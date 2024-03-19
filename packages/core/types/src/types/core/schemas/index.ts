@@ -52,6 +52,11 @@ export interface Schema {
    * Information about schema naming and display
    */
   info: Info;
+
+  /**
+   * DB only
+   */
+  indexes?: unknown[];
 }
 
 /**

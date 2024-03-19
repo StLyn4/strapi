@@ -39,6 +39,11 @@ export interface Attribute<TKind extends Kind = Kind> {
    */
   pluginOptions?: object;
   useJoinTable?: boolean;
+
+  /**
+   * searchable
+   */
+  searchable?: boolean;
 }
 
 /**

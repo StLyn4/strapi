@@ -12,7 +12,7 @@ const bytesToHumanReadable = (bytes: number) => {
   return `${Math.round(bytes / 1000 ** i)} ${sizes[i]}`;
 };
 
-const streamToBuffer = (stream: Readable) =>
+const streamToBuffer = (stream: Readable): Promise<Buffer> =>
   new Promise((resolve, reject) => {
     const chunks: Uint8Array[] = [];
     stream.on('data', (chunk) => {
