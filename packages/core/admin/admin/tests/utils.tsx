@@ -18,7 +18,6 @@ import {
   Queries,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { rest } from 'msw';
 import { DndProvider } from 'react-dnd';
 import { HTML5Backend } from 'react-dnd-html5-backend';
 import { QueryClient, QueryClientProvider, setLogger } from 'react-query';
@@ -37,6 +36,7 @@ import { NotificationsProvider } from '../src/features/Notifications';
 import { StrapiAppProvider } from '../src/features/StrapiApp';
 import { reducer as appReducer } from '../src/reducer';
 import { adminApi } from '../src/services/api';
+import { useGetMyPermissionsQuery } from '../src/services/auth';
 
 import { server } from './server';
 import { initialState } from './store';
@@ -51,7 +51,7 @@ interface ProvidersProps {
   children: React.ReactNode;
   initialEntries?: MemoryRouterProps['initialEntries'];
   storeConfig?: Partial<ConfigureStoreOptions>;
-  permissions?: Permission[];
+  permissions?: Permission[] | ((permissions: Permission[]) => Permission[] | undefined);
 }
 
 const defaultTestStoreConfig = {
@@ -75,6 +75,27 @@ const defaultTestStoreConfig = {
   ],
 };
 
+jest.mock('../src/services/auth', () => ({
+  ...jest.requireActual('../src/services/auth'),
+  useGetMyPermissionsQuery: jest.fn().mockReturnValue({
+    data: [],
+    refetch: jest.fn(),
+    isUninitialized: true,
+  }),
+}));
+
+const DEFAULT_PERMISSIONS = [
+  ...fixtures.permissions.allPermissions,
+  {
+    id: 314,
+    action: 'admin::users.read',
+    subject: null,
+    properties: {},
+    conditions: [],
+    actionParameters: {},
+  },
+];
+
 const Providers = ({ children, initialEntries, storeConfig, permissions = [] }: ProvidersProps) => {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -89,26 +110,16 @@ const Providers = ({ children, initialEntries, storeConfig, permissions = [] }: 
     storeConfig ?? defaultTestStoreConfig
   );
 
-  server.use(
-    rest.get('/admin/users/me/permissions', (req, res, ctx) =>
-      res(
-        ctx.json({
-          data: [
-            ...fixtures.permissions.allPermissions,
-            ...permissions,
-            {
-              id: 314,
-              action: 'admin::users.read',
-              subject: null,
-              properties: {},
-              conditions: [],
-              actionParameters: {},
-            },
-          ],
-        })
-      )
-    )
-  );
+  const allPermissions =
+    typeof permissions === 'function'
+      ? permissions(DEFAULT_PERMISSIONS)
+      : [...DEFAULT_PERMISSIONS, ...permissions];
+
+  jest.mocked(useGetMyPermissionsQuery).mockReturnValue({
+    data: allPermissions,
+    refetch: jest.fn(),
+    isUninitialized: true,
+  });
 
   const router = createMemoryRouter(
     [
@@ -254,13 +265,18 @@ const renderHook = <
 >(
   hook: (initialProps: Props) => Result,
   options?: RenderHookOptions<Props, Q, Container, BaseElement> &
-    Pick<RenderOptions, 'initialEntries'>
+    Pick<RenderOptions, 'initialEntries' | 'providerOptions'>
 ): RenderHookResult<Result, Props> => {
-  const { wrapper: Wrapper = fallbackWrapper, initialEntries, ...restOptions } = options ?? {};
+  const {
+    wrapper: Wrapper = fallbackWrapper,
+    initialEntries,
+    providerOptions,
+    ...restOptions
+  } = options ?? {};
 
   return renderHookRTL(hook, {
     wrapper: ({ children }) => (
-      <Providers initialEntries={initialEntries}>
+      <Providers initialEntries={initialEntries} {...providerOptions}>
         <Wrapper>{children}</Wrapper>
       </Providers>
     ),
