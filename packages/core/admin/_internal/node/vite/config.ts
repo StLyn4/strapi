@@ -1,6 +1,7 @@
 import type { InlineConfig, UserConfig } from 'vite';
 import browserslistToEsbuild from 'browserslist-to-esbuild';
 import react from '@vitejs/plugin-react-swc';
+import tsconfigPaths from 'vite-tsconfig-paths';
 
 import { getUserConfig } from '../core/config';
 import { loadStrapiMonorepo } from '../core/monorepo';
@@ -40,7 +41,14 @@ const resolveBaseConfig = async (ctx: BuildContext): Promise<InlineConfig> => {
       // https://react.dev/warnings/invalid-hook-call-warning#duplicate-react
       dedupe: ['react', 'react-dom', 'react-router-dom', 'styled-components'],
     },
-    plugins: [react(), buildFilesPlugin(ctx)],
+    plugins: [
+      react(),
+      buildFilesPlugin(ctx),
+      ctx.tsconfig && tsconfigPaths({
+        root: ctx.appDir,
+        projects: [ctx.tsconfig.path],
+      }),
+    ],
   };
 };
 

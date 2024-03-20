@@ -89,7 +89,12 @@ const develop = async ({
 
   if (tsconfig?.config) {
     // `ts-node` will be responsible for processing typescript files
-    tsNode.register();
+    tsNode.register({
+      project: tsconfig.path,
+      require: ['tsconfig-paths/register'],
+      transpileOnly: true,
+      swc: true,
+    });
   }
 
   if (cluster.isPrimary) {

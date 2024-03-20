@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { Configuration, DefinePlugin, HotModuleReplacementPlugin } from 'webpack';
 import ReactRefreshWebpackPlugin from '@pmmmwh/react-refresh-webpack-plugin';
+import TsconfigPathsPlugin from 'tsconfig-paths-webpack-plugin';
 
 import { getAliases } from './aliases';
 import { loadStrapiMonorepo } from '../core/monorepo';
@@ -29,6 +30,12 @@ const resolveBaseConfig = async (ctx: BuildContext) => {
     resolve: {
       alias: getAliases(ctx.cwd, monorepo),
       extensions: ['.js', '.jsx', '.react.js', '.ts', '.tsx'],
+      plugins: [
+        ctx.tsconfig &&
+          new TsconfigPathsPlugin({
+            configFile: ctx.tsconfig.path,
+          }),
+      ],
     },
     module: {
       rules: [

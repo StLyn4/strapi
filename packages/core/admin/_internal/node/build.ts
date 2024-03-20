@@ -1,6 +1,7 @@
 import type { CLIContext } from '@strapi/strapi';
 import EE from '@strapi/strapi/dist/utils/ee';
 import * as tsUtils from '@strapi/typescript-utils';
+import { replaceTscAliasPaths } from 'tsc-alias';
 import { checkRequiredDependencies } from './core/dependencies';
 import { getTimer, prettyTime } from './core/timer';
 import { writeStaticClientFiles } from './staticFiles';
@@ -57,6 +58,13 @@ const build = async ({ logger, cwd, tsconfig, ignorePrompts, ...options }: Build
     const compilingTsSpinner = logger.spinner(`Compiling TS`).start();
 
     tsUtils.compile(cwd, { configOptions: { ignoreDiagnostics: false } });
+
+    if (tsconfig.config.options.paths) {
+      await replaceTscAliasPaths({
+        configFile: tsconfig.path,
+        outDir: tsconfig.config.options.outDir ?? '',
+      });
+    }
 
     const compilingDuration = timer.end('compilingTS');
     compilingTsSpinner.text = `Compiling TS (${prettyTime(compilingDuration)})`;

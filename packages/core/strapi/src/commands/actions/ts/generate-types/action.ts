@@ -15,7 +15,11 @@ export default async ({ debug, silent, verbose, outDir }: CmdOptions) => {
     process.exit(1);
   }
 
-  tsNode.register();
+  tsNode.register({
+    require: ['tsconfig-paths/register'],
+    transpileOnly: true,
+    swc: true
+  });
 
   const appContext = await strapi.compile({ ignoreDiagnostics: true });
   const app = await strapi(appContext).register();
