@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { loadFile } from './load-config-file';
 
-const VALID_EXTENSIONS = ['.js', '.json'];
+const VALID_EXTENSIONS = ['.js', '.json', '.ts'];
 
 export default (dir: string) => {
   if (!fs.existsSync(dir)) return {};

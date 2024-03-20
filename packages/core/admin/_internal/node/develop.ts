@@ -4,6 +4,7 @@ import { joinBy } from '@strapi/utils';
 import chokidar from 'chokidar';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import * as tsNode from 'ts-node';
 
 import cluster from 'node:cluster';
 import strapiFactory from '@strapi/strapi';
@@ -86,6 +87,11 @@ const develop = async ({
 }: DevelopOptions) => {
   const timer = getTimer();
 
+  if (tsconfig?.config) {
+    // `ts-node` will be responsible for processing typescript files
+    tsNode.register();
+  }
+
   if (cluster.isPrimary) {
     const { didInstall } = await checkRequiredDependencies({ cwd, logger, ignorePrompts }).catch(
       (err) => {
@@ -96,12 +102,6 @@ const develop = async ({
 
     if (didInstall) {
       return;
-    }
-
-    if (tsconfig?.config) {
-      // Build without diagnostics in case schemas have changed
-      await cleanupDistDirectory({ tsconfig, logger, timer });
-      await tsUtils.compile(cwd, { configOptions: { ignoreDiagnostics: true } });
     }
 
     /**
@@ -146,11 +146,6 @@ const develop = async ({
     cluster.on('message', async (worker, message) => {
       switch (message) {
         case 'reload': {
-          if (tsconfig?.config) {
-            // Build without diagnostics in case schemas have changed
-            await cleanupDistDirectory({ tsconfig, logger, timer });
-            await tsUtils.compile(cwd, { configOptions: { ignoreDiagnostics: true } });
-          }
           logger.debug('cluster has the reload message, sending the worker kill message');
           worker.send('kill');
           break;
@@ -178,7 +173,7 @@ const develop = async ({
 
     const strapi = strapiFactory({
       appDir: cwd,
-      distDir: tsconfig?.config.options.outDir ?? '',
+      distDir: '',
       autoReload: true,
       serveAdminPanel: !watchAdmin,
     });
@@ -247,18 +242,6 @@ const develop = async ({
       const generatingDuration = timer.end('generatingTS');
       generatingTsSpinner.text = `Generating types (${prettyTime(generatingDuration)})`;
       generatingTsSpinner.succeed();
-    }
-
-    if (tsconfig?.config) {
-      timer.start('compilingTS');
-      const compilingTsSpinner = logger.spinner(`Compiling TS`).start();
-
-      await cleanupDistDirectory({ tsconfig, logger, timer });
-      await tsUtils.compile(cwd, { configOptions: { ignoreDiagnostics: false } });
-
-      const compilingDuration = timer.end('compilingTS');
-      compilingTsSpinner.text = `Compiling TS (${prettyTime(compilingDuration)})`;
-      compilingTsSpinner.succeed();
     }
 
     const restart = async () => {

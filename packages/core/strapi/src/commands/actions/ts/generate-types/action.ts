@@ -1,4 +1,5 @@
 import tsUtils from '@strapi/typescript-utils';
+import * as tsNode from 'ts-node';
 import strapi from '../../../../Strapi';
 
 interface CmdOptions {
@@ -13,6 +14,8 @@ export default async ({ debug, silent, verbose, outDir }: CmdOptions) => {
     console.error('Flags conflict: both silent and debug mode are enabled, exiting...');
     process.exit(1);
   }
+
+  tsNode.register();
 
   const appContext = await strapi.compile({ ignoreDiagnostics: true });
   const app = await strapi(appContext).register();

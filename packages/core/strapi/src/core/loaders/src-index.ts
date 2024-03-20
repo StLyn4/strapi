@@ -22,22 +22,25 @@ export default (strapi: Strapi) => {
     return;
   }
 
-  const pathToSrcIndex = resolve(strapi.dirs.dist.src, 'index.js');
-  if (!existsSync(pathToSrcIndex) || statSync(pathToSrcIndex).isDirectory()) {
-    return {};
-  }
+  for (const indexFile of ['index.js', 'index.ts']) {
+    const pathToSrcIndex = resolve(strapi.dirs.dist.src, indexFile);
 
-  const srcIndex = importDefault(pathToSrcIndex);
+    if (existsSync(pathToSrcIndex) && statSync(pathToSrcIndex).isFile()) {
+      const srcIndex = importDefault(pathToSrcIndex);
 
-  try {
-    validateSrcIndex(srcIndex);
-  } catch (e) {
-    if (e instanceof yup.ValidationError) {
-      strapi.stopWithError({ message: `Invalid file \`./src/index.js\`: ${e.message}` });
+      try {
+        validateSrcIndex(srcIndex);
+      } catch (e) {
+        if (e instanceof yup.ValidationError) {
+          strapi.stopWithError({ message: `Invalid file \`./src/${indexFile}\`: ${e.message}` });
+        }
+
+        throw e;
+      }
+
+      return srcIndex;
     }
-
-    throw e;
   }
 
-  return srcIndex;
+  return {};
 };

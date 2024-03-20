@@ -109,7 +109,7 @@ const createBuildContext = async ({
     strapiFactory({
       // Directories
       appDir: cwd,
-      distDir: tsconfig?.config.options.outDir ?? '',
+      distDir: tsconfig && process.env.NODE_ENV === 'production' ? tsconfig.config.options.outDir : '',
       // Options
       autoReload: true,
       serveAdminPanel: false,

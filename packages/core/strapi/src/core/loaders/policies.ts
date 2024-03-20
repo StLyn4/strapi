@@ -4,6 +4,8 @@ import { importDefault } from '@strapi/utils';
 
 import type { Strapi, Common } from '@strapi/types';
 
+const VALID_EXTENSIONS = ['.js', '.ts'];
+
 // TODO:: allow folders with index.js inside for bigger policies
 export default async function loadPolicies(strapi: Strapi) {
   const dir = strapi.dirs.dist.policies;
@@ -19,8 +21,8 @@ export default async function loadPolicies(strapi: Strapi) {
     const { name } = fd;
     const fullPath = join(dir, name);
 
-    if (fd.isFile() && extname(name) === '.js') {
-      const key = basename(name, '.js');
+    if (fd.isFile() && VALID_EXTENSIONS.includes(extname(name))) {
+      const key = basename(name, extname(name));
       policies[key] = importDefault(fullPath);
     }
   }

@@ -14,7 +14,8 @@ const loadJsFile = (file: string) => {
     return jsModule;
   } catch (error) {
     if (error instanceof Error) {
-      throw new Error(`Could not load js config file ${file}: ${error.message}`);
+      const ext = path.extname(file).substring(1);
+      throw new Error(`Could not load ${ext} config file ${file}: ${error.message}`);
     }
 
     throw new Error('Unknown error');
@@ -38,6 +39,7 @@ export const loadFile = (file: string) => {
 
   switch (ext) {
     case '.js':
+    case '.ts':
       return loadJsFile(file);
     case '.json':
       return loadJSONFile(file);

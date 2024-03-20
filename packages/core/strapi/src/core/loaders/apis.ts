@@ -112,6 +112,10 @@ const loadIndex = async (dir: string) => {
   if (await fse.pathExists(join(dir, 'index.js'))) {
     return loadFile(join(dir, 'index.js'));
   }
+
+  if (await fse.pathExists(join(dir, 'index.ts'))) {
+    return loadFile(join(dir, 'index.ts'));
+  }
 };
 
 const loadContentTypes = async (dir: string) => {
@@ -170,6 +174,7 @@ const loadFile = (file: string) => {
 
   switch (ext) {
     case '.js':
+    case '.ts':
       return importDefault(file);
     case '.json':
       return fse.readJSON(file);
