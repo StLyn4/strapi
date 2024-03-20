@@ -7,7 +7,7 @@ export default (filePath: string, useFileNameAsKey = true) => {
   const cleanPath = filePath.startsWith('./') ? filePath.slice(2) : filePath;
 
   const prop = cleanPath
-    .replace(/(\.settings|\.json|\.js)/g, '')
+    .replace(/(\.settings|\.json|\.js|\.mjs|\.ts)/g, '')
     .toLowerCase()
     .split('/')
     .map((p) => _.trimStart(p, '.'))

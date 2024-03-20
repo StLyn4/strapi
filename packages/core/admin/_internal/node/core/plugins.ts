@@ -138,6 +138,7 @@ const getEnabledPlugins = async ({
 };
 
 const PLUGIN_CONFIGS = ['plugins.js', 'plugins.mjs', 'plugins.ts'];
+const STRAPI_ADMIN_FILES = ['strapi-admin.js', 'strapi-admin.mjs', 'strapi-admin.ts'];
 
 type UserPluginConfigFile = Record<string, { enabled: boolean; resolve: string }>;
 
@@ -176,8 +177,14 @@ const getMapOfPluginsWithAdmin = (plugins: Record<string, PluginMeta>) =>
        * then it doesn't have an admin part to the package.
        */
       try {
-        const isLocalPluginWithLegacyAdminFile =
-          plugin.path && fs.existsSync(path.join(plugin.path, 'strapi-admin.js'));
+        let isLocalPluginWithLegacyAdminFile = false;
+
+        for (const filename of STRAPI_ADMIN_FILES) {
+          if (plugin.path && fs.existsSync(path.join(plugin.path, filename))) {
+            isLocalPluginWithLegacyAdminFile = true;
+            break;
+          }
+        }
 
         if (!isLocalPluginWithLegacyAdminFile) {
           const isModuleWithFE = require.resolve(`${plugin.modulePath}/strapi-admin`);

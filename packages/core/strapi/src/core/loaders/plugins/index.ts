@@ -35,7 +35,7 @@ const applyUserExtension = async (plugins: Plugins) => {
   }
 
   const extendedSchemas = await loadFiles(extensionsDir, '**/content-types/**/schema.json');
-  const strapiServers = await loadFiles(extensionsDir, '**/strapi-server.js');
+  const strapiServers = await loadFiles(extensionsDir, '**/strapi-server.{js,mjs,ts}');
 
   for (const pluginName of Object.keys(plugins)) {
     const plugin = plugins[pluginName];
@@ -82,6 +82,8 @@ const applyUserConfig = async (plugins: Plugins) => {
   }
 };
 
+const STRAPI_SERVER_FILES = ['strapi-server.js', 'strapi-server.mjs', 'strapi-server.ts'];
+
 export default async function loadPlugins(strapi: Strapi) {
   const plugins: Plugins = {};
 
@@ -92,28 +94,32 @@ export default async function loadPlugins(strapi: Strapi) {
   for (const pluginName of Object.keys(enabledPlugins)) {
     const enabledPlugin = enabledPlugins[pluginName];
 
-    let serverEntrypointPath;
+    for (const filename of STRAPI_SERVER_FILES) {
+      let serverEntrypointPath;
 
-    try {
-      serverEntrypointPath = join(enabledPlugin.pathToPlugin, 'strapi-server.js');
-    } catch (e) {
-      throw new Error(
-        `Error loading the plugin ${pluginName} because ${pluginName} is not installed. Please either install the plugin or remove it's configuration.`
-      );
+      try {
+        serverEntrypointPath = join(enabledPlugin.pathToPlugin, filename);
+      } catch (e) {
+        throw new Error(
+          `Error loading the plugin ${pluginName} because ${pluginName} is not installed. Please either install the plugin or remove it's configuration.`
+        );
+      }
+
+      // only load plugins with a server entrypoint
+      if (!(await fse.pathExists(serverEntrypointPath))) {
+        continue;
+      }
+
+      const pluginServer = loadFile(serverEntrypointPath);
+      plugins[pluginName] = {
+        ...defaultPlugin,
+        ...pluginServer,
+        config: defaults(defaultPlugin.config, pluginServer.config),
+        routes: pluginServer.routes ?? defaultPlugin.routes,
+      };
+
+      break;
     }
-
-    // only load plugins with a server entrypoint
-    if (!(await fse.pathExists(serverEntrypointPath))) {
-      continue;
-    }
-
-    const pluginServer = loadFile(serverEntrypointPath);
-    plugins[pluginName] = {
-      ...defaultPlugin,
-      ...pluginServer,
-      config: defaults(defaultPlugin.config, pluginServer.config),
-      routes: pluginServer.routes ?? defaultPlugin.routes,
-    };
   }
 
   // TODO: validate plugin format
