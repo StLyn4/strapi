@@ -1,0 +1,16 @@
+version: '1'
+rules:
+  - base: main
+    upstream: strapi:main
+    # mergeMethod: merge
+    conflictReviewers:
+      - StLyn4
+  - base: develop
+    upstream: strapi:develop
+    # mergeMethod: merge
+    conflictReviewers:
+      - StLyn4
+label: 'source: upstream, pr: chore'
+labels:
+  - 'source: upstream'
+  - 'pr: chore'
