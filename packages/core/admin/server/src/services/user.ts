@@ -1,9 +1,18 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import _ from 'lodash';
-import { defaults } from 'lodash/fp';
-import { stringIncludes, errors } from '@strapi/utils';
-import { Entity } from '@strapi/types';
+import _, { defaults } from 'lodash';
+
+import { arrays, errors, emitAudit } from '@strapi/utils';
+import type { Data } from '@strapi/types';
 import { createUser, hasSuperAdminRole } from '../domain/user';
+import {
+  AUDITED_EVENTS,
+  LEGACY_USER_EVENTS,
+  emitAdminUserCreated,
+  emitAdminUserDeleted,
+  emitAdminUserUpdateAudits,
+  toAdminUserEvent,
+  touchesTrackedFields,
+} from '../audit-logs/admin-users';
 import type {
   AdminUser,
   AdminRole,
@@ -16,12 +25,34 @@ import type {
 import { password as passwordValidator } from '../validation/common-validators';
 import { getService } from '../utils';
 import constants from './constants';
+import type { AdminRoleWithUsersCount } from './role';
 
 const { SUPER_ADMIN_CODE } = constants;
 
-const { ValidationError } = errors;
+const { ApplicationError, ValidationError } = errors;
 const sanitizeUserRoles = (role: AdminRole): SanitizedAdminRole =>
   _.pick(role, ['id', 'name', 'description', 'code']);
+
+/**
+ * Get the super admin role with its users count.
+ * Throws when the role doesn't exist, as the operation depends on it.
+ */
+const getSuperAdminRoleOrThrow = async (): Promise<AdminRoleWithUsersCount> => {
+  // The role lookup resolves to null when the role doesn't exist
+  const superAdminRole: AdminRoleWithUsersCount | null =
+    await getService('role').getSuperAdminWithUsersCount();
+
+  if (superAdminRole === null) {
+    throw new ApplicationError("Cannot proceed because the super admin role doesn't exist.");
+  }
+
+  return superAdminRole;
+};
+
+const getSessionManager = () => {
+  const manager = strapi.sessionManager;
+  return manager ?? null;
+};
 
 /**
  * Remove private user fields
@@ -29,7 +60,13 @@ const sanitizeUserRoles = (role: AdminRole): SanitizedAdminRole =>
  */
 const sanitizeUser = (user: AdminUser): SanitizedAdminUser => {
   return {
-    ..._.omit(user, ['password', 'resetPasswordToken', 'registrationToken', 'roles']),
+    ..._.omit(user, [
+      'password',
+      'resetPasswordToken',
+      'resetPasswordTokenExpiresAt',
+      'registrationToken',
+      'roles',
+    ]),
     roles: user.roles && user.roles.map(sanitizeUserRoles),
   };
 };
@@ -38,7 +75,7 @@ const sanitizeUser = (user: AdminUser): SanitizedAdminUser => {
  * Create and save a user in database
  * @param attributes A partial user object
  */
-const create = async (
+const createUserInDatabase = async (
   // isActive is added in the controller, it's not sent by the API.
   attributes: Partial<AdminUserCreationPayload> & { isActive?: true }
 ): Promise<AdminUser> => {
@@ -53,11 +90,67 @@ const create = async (
 
   const user = createUser(userInfo);
 
-  const createdUser = await strapi.query('admin::user').create({ data: user, populate: ['roles'] });
+  const createdUser = await strapi.db
+    .query('admin::user')
+    .create({ data: user, populate: ['roles'] });
 
+  return createdUser;
+};
+
+const emitUserCreated = async (user: AdminUser) => {
   getService('metrics').sendDidInviteUser();
 
-  strapi.eventHub.emit('user.create', { user: sanitizeUser(createdUser) });
+  strapi.eventHub.emit(LEGACY_USER_EVENTS.CREATE, { user: sanitizeUser(user) });
+  await emitAdminUserCreated({ strapi }, user);
+};
+
+const create = async (
+  // isActive is added in the controller, it's not sent by the API.
+  attributes: Partial<AdminUserCreationPayload> & { isActive?: true }
+): Promise<AdminUser> => {
+  const createdUser = await createUserInDatabase(attributes);
+
+  await emitUserCreated(createdUser);
+
+  return createdUser;
+};
+
+const createFirstAdmin = async (
+  attributes: Omit<Partial<AdminUserCreationPayload>, 'registrationToken' | 'isActive' | 'roles'>
+): Promise<AdminUser> => {
+  const createdUser = await strapi.db.transaction(async ({ trx }) => {
+    // Serialize first-admin creation across processes by locking a stable role row.
+    // SQLite ignores FOR UPDATE, but falls back to its single-writer transaction behavior.
+    const superAdminRole = await strapi.db
+      .queryBuilder('admin::role')
+      .select(['id'])
+      .where({ code: SUPER_ADMIN_CODE })
+      .first()
+      .transacting(trx)
+      .forUpdate()
+      .execute<AdminRole | undefined>();
+
+    if (!superAdminRole) {
+      throw new ApplicationError(
+        "Cannot register the first admin because the super admin role doesn't exist."
+      );
+    }
+
+    const hasAdmin = await exists();
+
+    if (hasAdmin) {
+      throw new ApplicationError('You cannot register a new super admin');
+    }
+
+    return createUserInDatabase({
+      ...attributes,
+      registrationToken: null,
+      isActive: true,
+      roles: [superAdminRole.id],
+    });
+  });
+
+  await emitUserCreated(createdUser);
 
   return createdUser;
 };
@@ -68,14 +161,14 @@ const create = async (
  * @param attributes A partial user object
  */
 const updateById = async (
-  id: Entity.ID,
+  id: Data.ID,
   attributes: Partial<AdminUserUpdatePayload>
 ): Promise<AdminUser> => {
   // Check at least one super admin remains
   if (_.has(attributes, 'roles')) {
     const lastAdminUser = await isLastSuperAdminUser(id);
-    const superAdminRole = await getService('role').getSuperAdminWithUsersCount();
-    const willRemoveSuperAdminRole = !stringIncludes(attributes.roles!, superAdminRole.id);
+    const superAdminRole = await getSuperAdminRoleOrThrow();
+    const willRemoveSuperAdminRole = !arrays.includesString(attributes.roles!, superAdminRole.id);
 
     if (lastAdminUser && willRemoveSuperAdminRole) {
       throw new ValidationError('You must have at least one user with super admin role.');
@@ -90,11 +183,16 @@ const updateById = async (
     }
   }
 
+  // The audit log records what changed, so it needs the row before the write
+  const previous = touchesTrackedFields(attributes)
+    ? await strapi.db.query('admin::user').findOne({ where: { id }, populate: ['roles'] })
+    : null;
+
   // hash password if a new one is sent
   if (_.has(attributes, 'password')) {
     const hashedPassword = await getService('auth').hashPassword(attributes.password!);
 
-    const updatedUser = await strapi.query('admin::user').update({
+    const updatedUser = await strapi.db.query('admin::user').update({
       where: { id },
       data: {
         ...attributes,
@@ -103,19 +201,21 @@ const updateById = async (
       populate: ['roles'],
     });
 
-    strapi.eventHub.emit('user.update', { user: sanitizeUser(updatedUser) });
+    strapi.eventHub.emit(LEGACY_USER_EVENTS.UPDATE, { user: sanitizeUser(updatedUser) });
+    await emitAdminUserUpdateAudits({ strapi }, { previous, updated: updatedUser, attributes });
 
     return updatedUser;
   }
 
-  const updatedUser = await strapi.query('admin::user').update({
+  const updatedUser = await strapi.db.query('admin::user').update({
     where: { id },
     data: attributes,
     populate: ['roles'],
   });
 
   if (updatedUser) {
-    strapi.eventHub.emit('user.update', { user: sanitizeUser(updatedUser) });
+    strapi.eventHub.emit(LEGACY_USER_EVENTS.UPDATE, { user: sanitizeUser(updatedUser) });
+    await emitAdminUserUpdateAudits({ strapi }, { previous, updated: updatedUser, attributes });
   }
 
   return updatedUser;
@@ -127,7 +227,9 @@ const updateById = async (
  * @param password - new password
  */
 const resetPasswordByEmail = async (email: string, password: string) => {
-  const user = await strapi.query('admin::user').findOne({ where: { email }, populate: ['roles'] });
+  const user = await strapi.db
+    .query('admin::user')
+    .findOne({ where: { email }, populate: ['roles'] });
 
   if (!user) {
     throw new Error(`User not found for email: ${email}`);
@@ -135,7 +237,7 @@ const resetPasswordByEmail = async (email: string, password: string) => {
 
   try {
     await passwordValidator.validate(password);
-  } catch (error) {
+  } catch {
     throw new ValidationError(
       'Invalid password. Expected a minimum of 8 characters with at least one number and one uppercase letter'
     );
@@ -148,13 +250,44 @@ const resetPasswordByEmail = async (email: string, password: string) => {
  * Check if a user is the last super admin
  * @param userId user's id to look for
  */
-const isLastSuperAdminUser = async (userId: Entity.ID): Promise<boolean> => {
+const isLastSuperAdminUser = async (userId: Data.ID): Promise<boolean> => {
   const user = (await findOne(userId)) as AdminUser | null;
   if (!user) return false;
 
-  const superAdminRole = await getService('role').getSuperAdminWithUsersCount();
+  const superAdminRole: AdminRoleWithUsersCount | null =
+    await getService('role').getSuperAdminWithUsersCount();
+
+  // Without a super admin role, no user can be the last super admin
+  if (superAdminRole === null) {
+    return false;
+  }
 
   return superAdminRole.usersCount === 1 && hasSuperAdminRole(user);
+};
+
+/**
+ * Check if a user is the first super admin
+ * @param userId user's id to look for
+ */
+const isFirstSuperAdminUser = async (userId: Data.ID): Promise<boolean> => {
+  const currentUser = (await findOne(userId)) as AdminUser | null;
+
+  if (!currentUser || !hasSuperAdminRole(currentUser)) return false;
+
+  const [oldestUser] = await strapi.db.query('admin::user').findMany({
+    populate: {
+      roles: {
+        where: {
+          code: { $eq: SUPER_ADMIN_CODE },
+        },
+      },
+    },
+    orderBy: { createdAt: 'asc' },
+    limit: 1,
+    select: ['id'],
+  });
+
+  return oldestUser.id === currentUser.id;
 };
 
 /**
@@ -162,7 +295,7 @@ const isLastSuperAdminUser = async (userId: Entity.ID): Promise<boolean> => {
  * @param attributes A partial user object
  */
 const exists = async (attributes = {} as unknown): Promise<boolean> => {
-  return (await strapi.query('admin::user').count({ where: attributes })) > 0;
+  return (await strapi.db.query('admin::user').count({ where: attributes })) > 0;
 };
 
 /**
@@ -173,7 +306,7 @@ const exists = async (attributes = {} as unknown): Promise<boolean> => {
 const findRegistrationInfo = async (
   registrationToken: string
 ): Promise<Pick<AdminUser, 'email' | 'firstname' | 'lastname'> | undefined> => {
-  const user = await strapi.query('admin::user').findOne({ where: { registrationToken } });
+  const user = await strapi.db.query('admin::user').findOne({ where: { registrationToken } });
 
   if (!user) {
     return undefined;
@@ -195,27 +328,32 @@ const register = async ({
   registrationToken: string;
   userInfo: Partial<AdminUser>;
 }) => {
-  const matchingUser = await strapi.query('admin::user').findOne({ where: { registrationToken } });
+  const matchingUser = await strapi.db
+    .query('admin::user')
+    .findOne({ where: { registrationToken } });
 
   if (!matchingUser) {
     throw new ValidationError('Invalid registration info');
   }
 
-  return getService('user').updateById(matchingUser.id, {
+  const registeredUser = await getService('user').updateById(matchingUser.id, {
     password: userInfo.password,
     firstname: userInfo.firstname,
     lastname: userInfo.lastname,
     registrationToken: null,
     isActive: true,
   });
+
+  await emitAudit({ strapi }, AUDITED_EVENTS.INVITE_ACCEPT, toAdminUserEvent(registeredUser));
+
+  return registeredUser;
 };
 
 /**
  * Find one user
  */
-const findOne = async (id: Entity.ID, populate = ['roles']) => {
-  // @ts-ignore - Migrate id type to StrapiID
-  return strapi.entityService.findOne('admin::user', id, { populate });
+const findOne = async (id: Data.ID, populate = ['roles']) => {
+  return strapi.db.query('admin::user').findOne({ where: { id }, populate });
 };
 
 /**
@@ -225,30 +363,32 @@ const findOne = async (id: Entity.ID, populate = ['roles']) => {
  * @returns
  */
 const findOneByEmail = async (email: string, populate = []) => {
-  return strapi.query('admin::user').findOne({
+  return strapi.db.query('admin::user').findOne({
     where: { email: { $eqi: email } },
     populate,
   });
 };
 
 /** Find many users (paginated)
- * @param query
+ * @param params
  */
-// TODO: TS - type find Page. At the moment, 'admin::user'is not being resolved by the ES type registry
-const findPage = async (query = {}): Promise<unknown> => {
-  const enrichedQuery = defaults({ populate: ['roles'] }, query);
-  return strapi.entityService.findPage('admin::user', enrichedQuery);
+const findPage = async (params = {}): Promise<unknown> => {
+  const query = strapi
+    .get('query-params')
+    .transform('admin::user', defaults({}, params, { populate: ['roles'] }));
+
+  return strapi.db.query('admin::user').findPage(query);
 };
 
 /** Delete a user
  * @param id id of the user to delete
  */
-const deleteById = async (id: Entity.ID): Promise<AdminUser | null> => {
+const deleteById = async (id: Data.ID): Promise<AdminUser | null> => {
   // Check at least one super admin remains
-  const userToDelete = (await strapi.query('admin::user').findOne({
+  const userToDelete: AdminUser | null = await strapi.db.query('admin::user').findOne({
     where: { id },
     populate: ['roles'],
-  })) as AdminUser | null;
+  });
 
   if (!userToDelete) {
     return null;
@@ -256,18 +396,25 @@ const deleteById = async (id: Entity.ID): Promise<AdminUser | null> => {
 
   if (userToDelete) {
     if (userToDelete.roles.some((r) => r.code === SUPER_ADMIN_CODE)) {
-      const superAdminRole = await getService('role').getSuperAdminWithUsersCount();
+      const superAdminRole = await getSuperAdminRoleOrThrow();
       if (superAdminRole.usersCount === 1) {
         throw new ValidationError('You must have at least one user with super admin role.');
       }
     }
   }
 
-  const deletedUser = await strapi
+  const deletedUser = await strapi.db
     .query('admin::user')
     .delete({ where: { id }, populate: ['roles'] });
 
-  strapi.eventHub.emit('user.delete', { user: sanitizeUser(deletedUser) });
+  // Invalidate all sessions for the deleted user
+  const sessionManager = getSessionManager();
+  if (sessionManager && sessionManager.hasOrigin('admin')) {
+    await sessionManager('admin').invalidateRefreshToken(String(id));
+  }
+
+  strapi.eventHub.emit(LEGACY_USER_EVENTS.DELETE, { user: sanitizeUser(deletedUser) });
+  await emitAdminUserDeleted({ strapi }, deletedUser);
 
   return deletedUser;
 };
@@ -277,8 +424,8 @@ const deleteById = async (id: Entity.ID): Promise<AdminUser | null> => {
  */
 const deleteByIds = async (ids: (string | number)[]): Promise<AdminUser[]> => {
   // Check at least one super admin remains
-  const superAdminRole = await getService('role').getSuperAdminWithUsersCount();
-  const nbOfSuperAdminToDelete = await strapi.query('admin::user').count({
+  const superAdminRole = await getSuperAdminRoleOrThrow();
+  const nbOfSuperAdminToDelete = await strapi.db.query('admin::user').count({
     where: {
       id: ids,
       roles: { id: superAdminRole.id },
@@ -291,17 +438,27 @@ const deleteByIds = async (ids: (string | number)[]): Promise<AdminUser[]> => {
 
   const deletedUsers = [] as AdminUser[];
   for (const id of ids) {
-    const deletedUser = await strapi.query('admin::user').delete({
+    const deletedUser = await strapi.db.query('admin::user').delete({
       where: { id },
       populate: ['roles'],
     });
 
+    // Invalidate all sessions for the deleted user
+    const sessionManager = getSessionManager();
+    if (sessionManager && sessionManager.hasOrigin('admin')) {
+      await sessionManager('admin').invalidateRefreshToken(String(id));
+    }
+
     deletedUsers.push(deletedUser);
   }
 
-  strapi.eventHub.emit('user.delete', {
+  strapi.eventHub.emit(LEGACY_USER_EVENTS.DELETE, {
     users: deletedUsers.map((deletedUser) => sanitizeUser(deletedUser)),
   });
+
+  for (const deletedUser of deletedUsers) {
+    await emitAdminUserDeleted({ strapi }, deletedUser);
+  }
 
   return deletedUsers;
 };
@@ -309,7 +466,7 @@ const deleteByIds = async (ids: (string | number)[]): Promise<AdminUser[]> => {
 /** Count the users that don't have any associated roles
  */
 const countUsersWithoutRole = async (): Promise<number> => {
-  return strapi.query('admin::user').count({
+  return strapi.db.query('admin::user').count({
     where: {
       roles: {
         id: { $null: true },
@@ -323,14 +480,14 @@ const countUsersWithoutRole = async (): Promise<number> => {
  * @param params params used for the query
  */
 const count = async (where = {}): Promise<number> => {
-  return strapi.query('admin::user').count({ where });
+  return strapi.db.query('admin::user').count({ where });
 };
 
 /**
  * Assign some roles to several users
  */
-const assignARoleToAll = async (roleId: Entity.ID): Promise<void> => {
-  const users = await strapi.query('admin::user').findMany({
+const assignARoleToAll = async (roleId: Data.ID): Promise<void> => {
+  const users = await strapi.db.query('admin::user').findMany({
     select: ['id'],
     where: {
       roles: { id: { $null: true } },
@@ -339,7 +496,7 @@ const assignARoleToAll = async (roleId: Entity.ID): Promise<void> => {
 
   await Promise.all(
     users.map((user) => {
-      return strapi.query('admin::user').update({
+      return strapi.db.query('admin::user').update({
         where: { id: user.id },
         data: { roles: [roleId] },
       });
@@ -360,13 +517,13 @@ const displayWarningIfUsersDontHaveRole = async (): Promise<void> => {
 /** Returns an array of interface languages currently used by users
  */
 const getLanguagesInUse = async (): Promise<string[]> => {
-  const users = await strapi.query('admin::user').findMany({ select: ['preferedLanguage'] });
+  const users = await strapi.db.query('admin::user').findMany({ select: ['preferedLanguage'] });
 
   return users.map((user) => user.preferedLanguage || 'en');
 };
-
 export default {
   create,
+  createFirstAdmin,
   updateById,
   exists,
   findRegistrationInfo,
@@ -383,4 +540,5 @@ export default {
   displayWarningIfUsersDontHaveRole,
   resetPasswordByEmail,
   getLanguagesInUse,
+  isFirstSuperAdminUser,
 };

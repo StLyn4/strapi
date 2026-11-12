@@ -1,8 +1,7 @@
 import { pruneSchema } from '@graphql-tools/utils';
 import { makeSchema } from 'nexus';
-import { prop, startsWith } from 'lodash/fp';
 import type * as Nexus from 'nexus';
-import type { Schema, Strapi } from '@strapi/types';
+import type { Core, Struct } from '@strapi/types';
 
 import { wrapResolvers } from './wrap-resolvers';
 import {
@@ -12,18 +11,14 @@ import {
   registerScalars,
   registerInternals,
   registerPolymorphicContentType,
-  contentType,
-} from './register-functions';
-import { TypeRegistry } from '../type-registry';
-
-const {
   registerEnumsDefinition,
   registerInputsDefinition,
   registerFiltersDefinition,
   registerDynamicZonesDefinition,
-} = contentType;
+} from './register-functions';
+import { TypeRegistry } from '../type-registry';
 
-export default ({ strapi }: { strapi: Strapi }) => {
+export default ({ strapi }: { strapi: Core.Strapi }) => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { mergeSchemas, addResolversToSchema } = require('@graphql-tools/schema');
 
@@ -37,6 +32,8 @@ export default ({ strapi }: { strapi: Strapi }) => {
   let registry: any;
   // Builders Instances
   let builders: any;
+  // Cached set of built-in query fields (populated at bootstrap)
+  let builtInQueryFields: Set<string> = new Set();
 
   const buildSchema = () => {
     const isShadowCRUDEnabled = !!config('shadowCRUD');
@@ -65,7 +62,10 @@ export default ({ strapi }: { strapi: Strapi }) => {
     const extension = extensionService.generate({ typeRegistry: registry });
 
     // Add the extension's resolvers to the final schema
-    const schemaWithResolvers = addResolversToSchema(schema, extension.resolvers);
+    const schemaWithResolvers = addResolversToSchema({
+      schema,
+      resolvers: extension.resolvers,
+    });
 
     // Create a configuration object for the artifacts generation
     const outputs: Nexus.core.SchemaConfig['outputs'] = {
@@ -103,7 +103,19 @@ export default ({ strapi }: { strapi: Strapi }) => {
     return prunedNexusSchema;
   };
 
+  const getBuiltInQueryFields = () => builtInQueryFields;
+
+  const isBuiltInQueryField = (fieldName: string) =>
+    builtInQueryFields.has(fieldName) || fieldName.endsWith('_connection');
+
   const buildMergedSchema = ({ registry }: { registry: TypeRegistry }) => {
+    // Capture the built-in (shadow CRUD) query fields from a schema built with only the
+    // registry's own types, before any extension-registered types/typeDefs are merged in,
+    // so isBuiltInQueryField can tell shadow CRUD fields apart from custom extension resolvers.
+    const shadowCRUDSchema = makeSchema({ types: [registry.definitions] });
+    const shadowCRUDQueryFields = shadowCRUDSchema.getQueryType()?.getFields() ?? {};
+    builtInQueryFields = new Set(Object.keys(shadowCRUDQueryFields));
+
     // Here we extract types, plugins & typeDefs from a temporary generated
     // extension since there won't be any addition allowed after schemas generation
     const { types, typeDefs = [] } = extensionService.generate({ typeRegistry: registry });
@@ -131,8 +143,8 @@ export default ({ strapi }: { strapi: Strapi }) => {
 
     // Disable Shadow CRUD for admin content types
     contentTypes
-      .map(prop('uid'))
-      .filter(startsWith('admin::'))
+      .map((contentType) => contentType.uid)
+      .filter((uid) => uid.startsWith('admin::'))
       .forEach((uid) => extensionService.shadowCRUD(uid).disable());
 
     const contentTypesWithShadowCRUD = contentTypes.filter((ct) =>
@@ -150,7 +162,7 @@ export default ({ strapi }: { strapi: Strapi }) => {
    * Register needed GraphQL types for every content type
    * @param {object[]} contentTypes
    */
-  const registerAPITypes = (contentTypes: Schema.Any[]) => {
+  const registerAPITypes = (contentTypes: Struct.Schema[]) => {
     for (const contentType of contentTypes) {
       const { modelType } = contentType;
 
@@ -183,7 +195,7 @@ export default ({ strapi }: { strapi: Strapi }) => {
     }
   };
 
-  const registerMorphTypes = (contentTypes: Schema.Any[]) => {
+  const registerMorphTypes = (contentTypes: Struct.Schema[]) => {
     // Create & register a union type that includes every type or component registered
     const genericMorphType = builders.buildGenericMorphDefinition();
     registry.register(GENERIC_MORPH_TYPENAME, genericMorphType, { kind: KINDS.morph });
@@ -193,5 +205,5 @@ export default ({ strapi }: { strapi: Strapi }) => {
     }
   };
 
-  return { buildSchema };
+  return { buildSchema, getBuiltInQueryFields, isBuiltInQueryField };
 };

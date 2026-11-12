@@ -1,16 +1,26 @@
-import { pipeAsync } from '@strapi/utils';
-import { LoadedStrapi as Strapi, EntityService, Common } from '@strapi/types';
+import type { Ability } from '@casl/ability';
+import { async } from '@strapi/utils';
+import { isEmpty } from 'lodash';
 
-const ACTIONS = {
+import type { Core, UID, Modules } from '@strapi/types';
+
+export const ACTIONS = {
   read: 'plugin::content-manager.explorer.read',
   create: 'plugin::content-manager.explorer.create',
   update: 'plugin::content-manager.explorer.update',
   delete: 'plugin::content-manager.explorer.delete',
   publish: 'plugin::content-manager.explorer.publish',
   unpublish: 'plugin::content-manager.explorer.publish',
+  discard: 'plugin::content-manager.explorer.update',
 } as const;
 
-type Entity = EntityService.Result<Common.UID.ContentType>;
+type ActionName = keyof typeof ACTIONS;
+
+const ACTION_NAMES = Object.keys(ACTIONS) as ActionName[];
+
+type SanitizedQueryOptions = { action?: string } | string;
+
+type Entity = Modules.EntityService.Result<UID.ContentType>;
 type Query = {
   page?: string;
   pageSize?: string;
@@ -18,30 +28,67 @@ type Query = {
 };
 
 const createPermissionChecker =
-  (strapi: Strapi) =>
-  ({ userAbility, model }: { userAbility: any; model: string }) => {
-    const permissionsManager = strapi.admin.services.permission.createPermissionsManager({
+  (strapi: Core.Strapi) =>
+  ({ userAbility, model }: { userAbility: Ability; model: string }) => {
+    const permissionsManager = strapi.service('admin::permission').createPermissionsManager({
       ability: userAbility,
       model,
     });
 
-    const toSubject = (entity?: Entity) =>
-      entity ? permissionsManager.toSubject(entity, model) : model;
+    const { actionProvider } = strapi.service('admin::permission');
 
-    // @ts-expect-error preserve the parameter order
-    // eslint-disable-next-line @typescript-eslint/default-param-last
-    const can = (action: string, entity?: Entity, field: string) => {
-      return userAbility.can(action, toSubject(entity), field);
+    const toSubject = (entity?: Entity) => {
+      return entity ? permissionsManager.toSubject(entity, model) : model;
     };
 
-    // @ts-expect-error preserve the parameter order
-    // eslint-disable-next-line @typescript-eslint/default-param-last
-    const cannot = (action: string, entity?: Entity, field: string) => {
-      return userAbility.cannot(action, toSubject(entity), field);
+    const can = (action: string, entity?: Entity, field?: string) => {
+      const subject = toSubject(entity);
+      const aliases = actionProvider.unstable_aliases(action, model) as string[];
+
+      return (
+        // Test the original action to see if it passes
+        userAbility.can(action, subject, field) ||
+        // Else try every known alias if at least one of them succeed, then the user "can"
+        aliases.some((alias) => userAbility.can(alias, subject, field))
+      );
+    };
+
+    const cannot = (action: string, entity?: Entity, field?: string) => {
+      const subject = toSubject(entity);
+      const aliases = actionProvider.unstable_aliases(action, model) as string[];
+
+      return (
+        // Test both the original action
+        userAbility.cannot(action, subject, field) &&
+        // and every known alias, if all of them fail (cannot), then the user truly "cannot"
+        aliases.every((alias) => userAbility.cannot(alias, subject, field))
+      );
     };
 
     const sanitizeOutput = (data: Entity, { action = ACTIONS.read }: { action?: string } = {}) => {
       return permissionsManager.sanitizeOutput(data, { subject: toSubject(data), action });
+    };
+
+    const getRulesForAction = (action: string) => {
+      if (typeof userAbility.rulesFor !== 'function') {
+        return [];
+      }
+
+      const aliases = actionProvider.unstable_aliases(action, model) as string[];
+      const actions = [action, ...aliases];
+
+      return actions.flatMap((actionName) => userAbility.rulesFor(actionName, model));
+    };
+
+    // Tell callers if we need the full entity to check access
+    const requiresEntity = (action: string) => {
+      if (typeof userAbility.rulesFor !== 'function') {
+        return true;
+      }
+
+      const rules = getRulesForAction(action);
+
+      return rules.some((rule: any) => rule.conditions && !isEmpty(rule.conditions));
     };
 
     const sanitizeQuery = (query: Query, { action = ACTIONS.read }: { action?: string } = {}) => {
@@ -70,22 +117,34 @@ const createPermissionChecker =
     const sanitizeUpdateInput = (entity: Entity) => (data: any) =>
       sanitizeInput(ACTIONS.update, data, entity);
 
-    const buildPermissionQuery = (query: Query, action: { action?: string } = {}) => {
+    const buildPermissionQuery = (query: Query, action: string) => {
       return permissionsManager.addPermissionsQueryTo(query, action);
     };
 
-    const sanitizedQuery = (query: Query, action: { action?: string } = {}) => {
-      return pipeAsync(
-        (q: Query) => sanitizeQuery(q, action),
+    /**
+     * Sanitizes the query with the rules of the action, then adds the action's permission
+     * conditions to it. The action defaults to read.
+     * The action can also be given as a plain string, the v4 signature
+     * `sanitizedQuery(query, actionUID)`, which untyped plugin code may still use.
+     */
+    const sanitizedQueryForAction = (query: Query, options: SanitizedQueryOptions = {}) => {
+      const action = typeof options === 'string' ? options : (options.action ?? ACTIONS.read);
+
+      return async.pipe(
+        (q: Query) => sanitizeQuery(q, { action }),
         (q: Query) => buildPermissionQuery(q, action)
       )(query);
     };
 
-    // Sanitized queries shortcuts
-    Object.keys(ACTIONS).forEach((action) => {
-      // @ts-expect-error TODO
-      sanitizedQuery[action] = (query: Query) => sanitizedQuery(query, ACTIONS[action]);
-    });
+    // Sanitized queries shortcuts, e.g. `sanitizedQuery.update(query)`
+    const sanitizedQueryShortcuts = Object.fromEntries(
+      ACTION_NAMES.map((name) => [
+        name,
+        (query: Query) => sanitizedQueryForAction(query, { action: ACTIONS[name] }),
+      ])
+    ) as Record<ActionName, (query: Query) => ReturnType<typeof sanitizedQueryForAction>>;
+
+    const sanitizedQuery = Object.assign(sanitizedQueryForAction, sanitizedQueryShortcuts);
 
     // Permission utils shortcuts
     Object.keys(ACTIONS).forEach((action) => {
@@ -93,12 +152,15 @@ const createPermissionChecker =
       can[action] = (...args: any) => can(ACTIONS[action], ...args);
       // @ts-expect-error TODO
       cannot[action] = (...args: any) => cannot(ACTIONS[action], ...args);
+      // @ts-expect-error TODO
+      requiresEntity[action] = () => requiresEntity(ACTIONS[action]);
     });
 
     return {
       // Permission utils
       can, // check if you have the permission
       cannot, // check if you don't have the permission
+      requiresEntity, // check if entity data is needed for permission evaluation
       // Sanitizers
       sanitizeOutput,
       sanitizeQuery,
@@ -112,6 +174,6 @@ const createPermissionChecker =
     };
   };
 
-export default ({ strapi }: { strapi: Strapi }) => ({
+export default ({ strapi }: { strapi: Core.Strapi }) => ({
   create: createPermissionChecker(strapi),
 });

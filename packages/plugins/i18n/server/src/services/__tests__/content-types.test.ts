@@ -1,11 +1,10 @@
+import type { Struct } from '@strapi/types';
 import { errors } from '@strapi/utils';
 import contentTypesServiceFactory from '../content-types';
 
 const {
   isLocalizedContentType,
   getValidLocale,
-  getNewLocalizationsFrom,
-  getAndValidateRelatedEntity,
   getNonLocalizedAttributes,
   copyNonLocalizedAttributes,
   fillNonLocalizedAttributes,
@@ -203,173 +202,6 @@ describe('content-types service', () => {
     });
   });
 
-  describe.each([['singleType'], ['collectionType']])(
-    'getAndValidateRelatedEntity - %s',
-    (kind) => {
-      test("Throw if relatedEntity is provided but doesn't exist", async () => {
-        const findOne = jest.fn(() => Promise.resolve(undefined));
-        const relatedEntityId = 1;
-        const model = 'api::country.country';
-        const locale = 'fr';
-
-        global.strapi = {
-          query: () => ({
-            findOne,
-          }),
-          getModel: () => ({ kind }),
-        } as any;
-
-        try {
-          await getAndValidateRelatedEntity(relatedEntityId, model, locale);
-        } catch (e: any) {
-          expect(e instanceof ApplicationError).toBe(true);
-          expect(e.message).toBe("The related entity doesn't exist");
-        }
-
-        expect(findOne).toHaveBeenCalledWith(
-          kind === 'singleType'
-            ? { populate: ['localizations'] }
-            : { where: { id: relatedEntityId }, populate: ['localizations'] }
-        );
-        expect.assertions(3);
-      });
-
-      test('Throw if locale already exists (1/2)', async () => {
-        const relatedEntityId = 1;
-        const relatedEntity = {
-          id: relatedEntityId,
-          locale: 'en',
-          localizations: [],
-        };
-        const findOne = jest.fn(() => Promise.resolve(relatedEntity));
-        const model = 'api::country.country';
-        const locale = 'en';
-
-        global.strapi = {
-          query: () => ({
-            findOne,
-          }),
-          getModel: () => ({ kind }),
-        } as any;
-
-        try {
-          await getAndValidateRelatedEntity(relatedEntityId, model, locale);
-        } catch (e: any) {
-          expect(e instanceof ApplicationError).toBe(true);
-          expect(e.message).toBe('The entity already exists in this locale');
-        }
-
-        expect(findOne).toHaveBeenCalledWith(
-          kind === 'singleType'
-            ? { populate: ['localizations'] }
-            : { where: { id: relatedEntityId }, populate: ['localizations'] }
-        );
-        expect.assertions(3);
-      });
-
-      test('Throw if locale already exists (2/2)', async () => {
-        const relatedEntityId = 1;
-        const relatedEntity = {
-          id: relatedEntityId,
-          locale: 'fr',
-          localizations: [
-            {
-              id: 2,
-              locale: 'en',
-            },
-          ],
-        };
-        const findOne = jest.fn(() => Promise.resolve(relatedEntity));
-        const model = 'api::country.country';
-        const locale = 'en';
-
-        global.strapi = {
-          query: () => ({
-            findOne,
-          }),
-          getModel: () => ({ kind }),
-        } as any;
-
-        try {
-          await getAndValidateRelatedEntity(relatedEntityId, model, locale);
-        } catch (e: any) {
-          expect(e instanceof ApplicationError).toBe(true);
-          expect(e.message).toBe('The entity already exists in this locale');
-        }
-
-        expect(findOne).toHaveBeenCalledWith(
-          kind === 'singleType'
-            ? { populate: ['localizations'] }
-            : { where: { id: relatedEntityId }, populate: ['localizations'] }
-        );
-        expect.assertions(3);
-      });
-
-      test('get related entity', async () => {
-        const relatedEntityId = 1;
-        const relatedEntity = {
-          id: relatedEntityId,
-          locale: 'fr',
-          localizations: [
-            {
-              id: 2,
-              locale: 'en',
-            },
-          ],
-        };
-        const findOne = jest.fn(() => Promise.resolve(relatedEntity));
-        const model = 'api::country.country';
-        const locale = 'it';
-
-        global.strapi = {
-          query: () => ({
-            findOne,
-          }),
-          getModel: () => ({ kind }),
-        } as any;
-
-        const foundEntity = await getAndValidateRelatedEntity(relatedEntityId, model, locale);
-
-        expect(foundEntity).toEqual(relatedEntity);
-        expect(findOne).toHaveBeenCalledWith(
-          kind === 'singleType'
-            ? { populate: ['localizations'] }
-            : { where: { id: relatedEntityId }, populate: ['localizations'] }
-        );
-        expect.assertions(2);
-      });
-    }
-  );
-
-  describe('getNewLocalizationsFrom', () => {
-    test('Can get localizations', async () => {
-      const relatedEntity = {
-        id: 1,
-        locale: 'fr',
-        localizations: [
-          {
-            id: 2,
-            locale: 'en',
-          },
-          {
-            id: 3,
-            locale: 'it',
-          },
-        ],
-      };
-
-      const localizations = await getNewLocalizationsFrom(relatedEntity);
-
-      expect(localizations).toEqual([1, 2, 3]);
-    });
-
-    test('Add empty localizations if none exist (CT)', async () => {
-      const localizations = await getNewLocalizationsFrom(undefined);
-
-      expect(localizations).toEqual([]);
-    });
-  });
-
   describe('copyNonLocalizedAttributes', () => {
     test('Does not copy locale, localizations & publishedAt', () => {
       const model = {
@@ -402,7 +234,7 @@ describe('content-types service', () => {
             visible: false,
           },
         },
-      };
+      } as unknown as Struct.ContentTypeSchema;
 
       const input = {
         id: 1,
@@ -441,7 +273,7 @@ describe('content-types service', () => {
             type: 'string',
           },
         },
-      };
+      } as unknown as Struct.ContentTypeSchema;
 
       const input = {
         id: 1,
@@ -490,7 +322,7 @@ describe('content-types service', () => {
             component: 'compo',
           },
         },
-      };
+      } as unknown as Struct.ContentTypeSchema;
 
       const input = {
         id: 1,
@@ -574,6 +406,402 @@ describe('content-types service', () => {
         le: {},
       });
     });
+
+    it('fills empty arrays from the related entry (admin create-locale defaults)', () => {
+      const entry = {
+        name: 'fr',
+        variants: [],
+      };
+      const relatedEntry = {
+        name: 'en',
+        variants: [{ name: 'keep-me' }],
+      };
+      const componentModel = {
+        attributes: {
+          name: { type: 'string' },
+        },
+      };
+      const modelDef = {
+        attributes: {
+          name: { pluginOptions: { i18n: { localized: true } } },
+          variants: {
+            type: 'component',
+            component: 'default.variant',
+            repeatable: true,
+            pluginOptions: { i18n: { localized: false } },
+          },
+        },
+      };
+
+      const getModel = jest.fn(() => modelDef);
+      global.strapi = {
+        getModel,
+        components: { 'default.variant': componentModel },
+      } as any;
+
+      fillNonLocalizedAttributes(entry, relatedEntry, { model: 'model' });
+
+      expect(entry.variants).toEqual([{ name: 'keep-me' }]);
+      expect(entry.name).toBe('fr');
+    });
+
+    it('preserves explicit empty arrays for non-component attributes', () => {
+      const modelDef = {
+        attributes: {
+          config: {
+            type: 'json',
+            pluginOptions: { i18n: { localized: false } },
+          },
+          gallery: {
+            type: 'media',
+            multiple: true,
+            pluginOptions: { i18n: { localized: false } },
+          },
+        },
+      };
+
+      global.strapi = {
+        getModel: jest.fn(() => modelDef),
+        components: {},
+      } as any;
+
+      const entry = {
+        config: [],
+        gallery: [],
+      };
+      const relatedEntry = {
+        config: [{ source: 'default-locale' }],
+        gallery: [{ id: 42, name: 'default.jpg' }],
+      };
+
+      fillNonLocalizedAttributes(entry, relatedEntry, { model: 'model' });
+
+      expect(entry).toEqual({
+        config: [],
+        gallery: [],
+      });
+    });
+
+    it('deep-fills nested components when the parent component is present but nested keys are unset', () => {
+      const innerModel = {
+        attributes: {
+          label: { type: 'string' },
+        },
+      };
+      const midModel = {
+        attributes: {
+          heading: { type: 'string' },
+          inners: {
+            type: 'component',
+            component: 'default.inner',
+            repeatable: true,
+          },
+        },
+      };
+      const outerModel = {
+        attributes: {
+          name: { type: 'string' },
+          mid: {
+            type: 'component',
+            component: 'default.mid',
+            repeatable: false,
+          },
+        },
+      };
+      const modelDef = {
+        attributes: {
+          title: { pluginOptions: { i18n: { localized: true } } },
+          profile: {
+            type: 'component',
+            component: 'default.outer',
+            repeatable: false,
+            pluginOptions: { i18n: { localized: false } },
+          },
+        },
+      };
+
+      const getModel = jest.fn(
+        (uid: string) =>
+          ({
+            model: modelDef,
+            'default.outer': outerModel,
+            'default.mid': midModel,
+            'default.inner': innerModel,
+          })[uid]
+      );
+      global.strapi = {
+        getModel,
+        components: {
+          'default.outer': outerModel,
+          'default.mid': midModel,
+          'default.inner': innerModel,
+        },
+      } as any;
+
+      const entry = {
+        title: 'fr',
+        profile: { name: 'shared-name' },
+      };
+      const relatedEntry = {
+        title: 'en',
+        profile: {
+          name: 'shared-name',
+          mid: { heading: 'keep-heading', inners: [{ label: 'keep-inner' }] },
+        },
+      };
+
+      fillNonLocalizedAttributes(entry, relatedEntry, { model: 'model' });
+
+      expect(entry.profile).toEqual({
+        name: 'shared-name',
+        mid: { heading: 'keep-heading', inners: [{ label: 'keep-inner' }] },
+      });
+      expect(entry.title).toBe('fr');
+    });
+
+    it('deep-fills nested empty arrays inside a present non-localized component', () => {
+      const innerModel = {
+        attributes: {
+          label: { type: 'string' },
+        },
+      };
+      const outerModel = {
+        attributes: {
+          name: { type: 'string' },
+          inners: {
+            type: 'component',
+            component: 'default.inner',
+            repeatable: true,
+          },
+        },
+      };
+      const modelDef = {
+        attributes: {
+          profile: {
+            type: 'component',
+            component: 'default.outer',
+            repeatable: false,
+            pluginOptions: { i18n: { localized: false } },
+          },
+        },
+      };
+
+      global.strapi = {
+        getModel: (uid: string) =>
+          ({
+            model: modelDef,
+            'default.outer': outerModel,
+            'default.inner': innerModel,
+          })[uid],
+        components: {
+          'default.outer': outerModel,
+          'default.inner': innerModel,
+        },
+      } as any;
+
+      const entry = {
+        profile: { name: 'shared-name', inners: [] },
+      };
+      const relatedEntry = {
+        profile: {
+          name: 'shared-name',
+          inners: [{ label: 'keep-inner' }],
+        },
+      };
+
+      fillNonLocalizedAttributes(entry, relatedEntry, { model: 'model' });
+
+      expect(entry.profile.inners).toEqual([{ label: 'keep-inner' }]);
+    });
+
+    it('fills empty dynamic zones from the related entry', () => {
+      const componentModel = {
+        attributes: {
+          name: { type: 'string' },
+        },
+      };
+      const modelDef = {
+        attributes: {
+          title: { pluginOptions: { i18n: { localized: true } } },
+          blocks: {
+            type: 'dynamiczone',
+            components: ['default.compo'],
+            pluginOptions: { i18n: { localized: false } },
+          },
+        },
+      };
+
+      global.strapi = {
+        getModel: jest.fn(() => modelDef),
+        components: { 'default.compo': componentModel },
+      } as any;
+
+      const entry = {
+        title: 'fr',
+        blocks: [],
+      };
+      const relatedEntry = {
+        title: 'en',
+        blocks: [{ __component: 'default.compo', name: 'hero' }],
+      };
+
+      fillNonLocalizedAttributes(entry, relatedEntry, { model: 'model' });
+
+      expect(entry.blocks).toEqual([{ __component: 'default.compo', name: 'hero' }]);
+      expect(entry.title).toBe('fr');
+    });
+
+    it('preserves non-empty repeatable component payloads without positional merging', () => {
+      const innerModel = {
+        attributes: {
+          label: { type: 'string' },
+        },
+      };
+      const outerModel = {
+        attributes: {
+          name: { type: 'string' },
+          inners: {
+            type: 'component',
+            component: 'default.inner',
+            repeatable: true,
+          },
+        },
+      };
+      const modelDef = {
+        attributes: {
+          profiles: {
+            type: 'component',
+            component: 'default.outer',
+            repeatable: true,
+            pluginOptions: { i18n: { localized: false } },
+          },
+        },
+      };
+
+      global.strapi = {
+        getModel: (uid: string) =>
+          ({
+            model: modelDef,
+            'default.outer': outerModel,
+            'default.inner': innerModel,
+          })[uid],
+        components: {
+          'default.outer': outerModel,
+          'default.inner': innerModel,
+        },
+      } as any;
+
+      const entry = {
+        profiles: [{ name: 'keep-parent', inners: [] }],
+      };
+      const relatedEntry = {
+        profiles: [
+          { name: 'old-parent', inners: [{ label: 'keep-inner' }] },
+          { name: 'intentionally-removed', inners: [{ label: 'do-not-restore' }] },
+        ],
+      };
+
+      fillNonLocalizedAttributes(entry, relatedEntry, { model: 'model' });
+
+      expect(entry.profiles).toEqual([{ name: 'keep-parent', inners: [] }]);
+    });
+
+    it('preserves non-empty dynamic-zone payloads without positional merging', () => {
+      const innerModel = {
+        attributes: {
+          label: { type: 'string' },
+        },
+      };
+      const heroModel = {
+        attributes: {
+          name: { type: 'string' },
+          inners: {
+            type: 'component',
+            component: 'default.inner',
+            repeatable: true,
+          },
+        },
+      };
+      const otherModel = {
+        attributes: {
+          name: { type: 'string' },
+        },
+      };
+      const modelDef = {
+        attributes: {
+          blocks: {
+            type: 'dynamiczone',
+            components: ['default.hero', 'default.other'],
+            pluginOptions: { i18n: { localized: false } },
+          },
+        },
+      };
+
+      global.strapi = {
+        getModel: (uid: string) =>
+          ({
+            model: modelDef,
+            'default.hero': heroModel,
+            'default.other': otherModel,
+            'default.inner': innerModel,
+          })[uid],
+        components: {
+          'default.hero': heroModel,
+          'default.other': otherModel,
+          'default.inner': innerModel,
+        },
+      } as any;
+
+      const entry = {
+        blocks: [
+          { __component: 'default.hero', name: 'keep-parent', inners: [] },
+          { __component: 'default.other', name: 'replacement' },
+        ],
+      };
+      const relatedEntry = {
+        blocks: [
+          {
+            __component: 'default.hero',
+            name: 'old-parent',
+            inners: [{ label: 'keep-inner' }],
+          },
+          {
+            __component: 'default.hero',
+            name: 'different-component',
+            inners: [{ label: 'do-not-copy' }],
+          },
+        ],
+      };
+
+      fillNonLocalizedAttributes(entry, relatedEntry, { model: 'model' });
+
+      expect(entry.blocks).toEqual([
+        {
+          __component: 'default.hero',
+          name: 'keep-parent',
+          inners: [],
+        },
+        { __component: 'default.other', name: 'replacement' },
+      ]);
+    });
+
+    it('does nothing when the entry or the related entry is missing', () => {
+      const getModel = jest.fn();
+      global.strapi = { getModel } as any;
+
+      expect(fillNonLocalizedAttributes(null, { name: 'en' }, { model: 'model' })).toBeUndefined();
+      expect(fillNonLocalizedAttributes({ name: null }, null, { model: 'model' })).toBeUndefined();
+      expect(getModel).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when the model is unknown', () => {
+      const entry = { name: null };
+      global.strapi = { getModel: jest.fn(() => undefined) } as any;
+
+      fillNonLocalizedAttributes(entry, { name: 'en' }, { model: 'missing' });
+
+      expect(entry).toEqual({ name: null });
+    });
   });
 
   describe('getNestedPopulateOfNonLocalizedAttributes', () => {
@@ -642,7 +870,7 @@ describe('content-types service', () => {
               },
             },
           },
-        }[model]);
+        })[model];
 
       global.strapi = { getModel } as any;
     });

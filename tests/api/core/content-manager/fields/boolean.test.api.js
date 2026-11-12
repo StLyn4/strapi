@@ -39,8 +39,8 @@ describe('Test type boolean', () => {
       },
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject({
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data).toMatchObject({
       field: true,
     });
   });
@@ -58,8 +58,8 @@ describe('Test type boolean', () => {
       body: { field: 1 },
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject({
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data).toMatchObject({
       field: true,
     });
 
@@ -67,8 +67,8 @@ describe('Test type boolean', () => {
       body: { field: 0 },
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject({
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data).toMatchObject({
       field: false,
     });
   });
@@ -92,7 +92,7 @@ describe('Test type boolean', () => {
     });
 
     const updateRes = await rq.put(
-      `/content-manager/collection-types/api::withboolean.withboolean/${res.body.id}`,
+      `/content-manager/collection-types/api::withboolean.withboolean/${res.body.data.documentId}`,
       {
         body: {
           field: false,
@@ -101,9 +101,32 @@ describe('Test type boolean', () => {
     );
 
     expect(updateRes.statusCode).toBe(200);
-    expect(updateRes.body).toMatchObject({
-      id: res.body.id,
+    expect(updateRes.body.data).toMatchObject({
+      documentId: res.body.data.documentId,
       field: false,
+    });
+  });
+
+  test('Clearing boolean field should set it to null', async () => {
+    const res = await rq.post('/content-manager/collection-types/api::withboolean.withboolean', {
+      body: {
+        field: true,
+      },
+    });
+
+    const updateRes = await rq.put(
+      `/content-manager/collection-types/api::withboolean.withboolean/${res.body.data.documentId}`,
+      {
+        body: {
+          field: null,
+        },
+      }
+    );
+
+    expect(updateRes.statusCode).toBe(200);
+    expect(updateRes.body.data).toMatchObject({
+      documentId: res.body.data.documentId,
+      field: null,
     });
   });
 });

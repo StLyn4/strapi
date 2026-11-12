@@ -1,10 +1,14 @@
-import React from 'react';
-
-import { Box, Flex, Typography } from '@strapi/design-system';
+import { Box, BoxComponent, Flex, Typography } from '@strapi/design-system';
 import map from 'lodash/map';
 import tail from 'lodash/tail';
 import { useIntl } from 'react-intl';
-import styled, { DefaultTheme } from 'styled-components';
+import { styled, DefaultTheme } from 'styled-components';
+
+const DEFAULT_ROUTE: NonNullable<BoundRouteProps['route']> = {
+  handler: 'Nocontroller.error',
+  method: 'GET',
+  path: '/there-is-no-path',
+};
 
 type HttpVerb = 'POST' | 'GET' | 'PUT' | 'DELETE';
 
@@ -54,7 +58,7 @@ const getMethodColor = (verb: HttpVerb): MethodColor => {
   }
 };
 
-const MethodBox = styled(Box)`
+const MethodBox = styled<BoxComponent>(Box)`
   margin: -1px;
   border-radius: ${({ theme }) => theme.spaces[1]} 0 0 ${({ theme }) => theme.spaces[1]};
 `;
@@ -67,13 +71,7 @@ interface BoundRouteProps {
   };
 }
 
-export const BoundRoute = ({
-  route = {
-    handler: 'Nocontroller.error',
-    method: 'GET',
-    path: '/there-is-no-path',
-  },
-}: BoundRouteProps) => {
+export const BoundRoute = ({ route = DEFAULT_ROUTE }: BoundRouteProps) => {
   const { formatMessage } = useIntl();
 
   const { method, handler: title, path } = route;
@@ -83,7 +81,7 @@ export const BoundRoute = ({
 
   return (
     <Flex direction="column" alignItems="stretch" gap={2}>
-      <Typography variant="delta" as="h3">
+      <Typography variant="delta" tag="h3">
         {formatMessage({
           id: 'Settings.apiTokens.createPage.BoundRoute.title',
           defaultMessage: 'Bound route to',

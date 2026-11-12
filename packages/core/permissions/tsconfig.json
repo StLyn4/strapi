@@ -1,9 +1,8 @@
 {
   "extends": "tsconfig/base.json",
   "compilerOptions": {
-    "outDir": "dist",
-    "declarationMap": true
+    "types": ["node"]
   },
-  "include": ["src"],
-  "exclude": ["node_modules", "**/__tests__/**"]
+  "include": ["src", "vitest.config.ts"],
+  "exclude": ["**/__tests__/**"]
 }

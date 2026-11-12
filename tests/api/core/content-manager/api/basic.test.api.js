@@ -1,6 +1,6 @@
 'use strict';
 
-const { omit } = require('lodash/fp');
+const { omit } = require('lodash');
 
 const { createStrapiInstance } = require('api-tests/strapi');
 const { createTestBuilder } = require('api-tests/builder');
@@ -35,6 +35,7 @@ const product = {
       },
     },
   },
+  draftAndPublish: true,
   displayName: 'Product',
   singularName: 'product',
   pluralName: 'products',
@@ -67,11 +68,11 @@ describe('CM API - Basic', () => {
       body: product,
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(omit('hiddenAttribute', product));
-    expect(res.body).not.toHaveProperty('hiddenAttribute');
-    expect(res.body.publishedAt).toBeUndefined();
-    data.products.push(res.body);
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data).toMatchObject(omit(product, 'hiddenAttribute'));
+    expect(res.body.data).not.toHaveProperty('hiddenAttribute');
+    expect(res.body.data.publishedAt).toBeDefined();
+    data.products.push(res.body.data);
   });
 
   test('Read product', async () => {
@@ -91,7 +92,7 @@ describe('CM API - Basic', () => {
         }),
       ])
     );
-    res.body.results.forEach((p) => expect(p.publishedAt).toBeUndefined());
+    res.body.results.forEach((p) => expect(p.publishedAt).toBeDefined());
   });
 
   test('Update product', async () => {
@@ -102,27 +103,24 @@ describe('CM API - Basic', () => {
     };
     const res = await rq({
       method: 'PUT',
-      url: `/content-manager/collection-types/api::product.product/${data.products[0].id}`,
+      url: `/content-manager/collection-types/api::product.product/${data.products[0].documentId}`,
       body: product,
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(omit('hiddenAttribute', product));
-    expect(res.body.id).toEqual(data.products[0].id);
-    expect(res.body.publishedAt).toBeUndefined();
-    data.products[0] = res.body;
+    expect(res.body.data).toMatchObject(omit(product, 'hiddenAttribute'));
+    expect(res.body.data.documentId).toEqual(data.products[0].documentId);
+    expect(res.body.data.publishedAt).toBeDefined();
+    data.products[0] = res.body.data;
   });
 
   test('Delete product', async () => {
     const res = await rq({
       method: 'DELETE',
-      url: `/content-manager/collection-types/api::product.product/${data.products[0].id}`,
+      url: `/content-manager/collection-types/api::product.product/${data.products[0].documentId}`,
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(data.products[0]);
-    expect(res.body.id).toEqual(data.products[0].id);
-    expect(res.body.publishedAt).toBeUndefined();
     data.products.shift();
   });
 
@@ -140,12 +138,12 @@ describe('CM API - Basic', () => {
 
     const res = await rq({
       method: 'POST',
-      url: `/content-manager/collection-types/api::product.product/clone/${createdProduct.id}`,
+      url: `/content-manager/collection-types/api::product.product/clone/${createdProduct.data.documentId}`,
       body: {},
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(omit('hiddenAttribute', product));
+    expect(res.body.data).toMatchObject(omit(product, 'hiddenAttribute'));
   });
 
   test('Clone and update product', async () => {
@@ -162,29 +160,36 @@ describe('CM API - Basic', () => {
 
     const res = await rq({
       method: 'POST',
-      url: `/content-manager/collection-types/api::product.product/clone/${createdProduct.id}`,
+      url: `/content-manager/collection-types/api::product.product/clone/${createdProduct.data.documentId}`,
       body: {
         name: 'Product 1 updated',
       },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject({
+    expect(res.body.data).toMatchObject({
       name: 'Product 1 updated',
       description: 'Product description',
     });
   });
 
+  // TODO: Fix document service validations
   describe('validators', () => {
-    test('Cannot create a product - minLength', async () => {
+    test('Cannot publish a product - minLength', async () => {
       const product = {
         name: 'Product 1',
         description: '',
       };
-      const res = await rq({
+
+      const creationRes = await rq({
         method: 'POST',
         url: '/content-manager/collection-types/api::product.product',
         body: product,
+      });
+
+      const res = await rq({
+        method: 'POST',
+        url: `/content-manager/collection-types/api::product.product/${creationRes.body.data.documentId}/actions/publish`,
       });
 
       expect(res.statusCode).toBe(400);
@@ -206,27 +211,33 @@ describe('CM API - Basic', () => {
       });
     });
 
-    test('Cannot create a product - required', async () => {
+    test('Cannot publish a product - required', async () => {
       const product = {
         description: 'Product description',
       };
-      const res = await rq({
+
+      const creationRes = await rq({
         method: 'POST',
         url: '/content-manager/collection-types/api::product.product',
         body: product,
+      });
+
+      const res = await rq({
+        method: 'POST',
+        url: `/content-manager/collection-types/api::product.product/${creationRes.body.data.documentId}/actions/publish`,
       });
 
       expect(res.statusCode).toBe(400);
       expect(res.body).toMatchObject({
         data: null,
         error: {
-          message: 'name must be defined.',
+          message: 'name must be a `string` type, but the final value was: `null`.',
           name: 'ValidationError',
           details: {
             errors: [
               {
                 path: ['name'],
-                message: 'name must be defined.',
+                message: 'name must be a `string` type, but the final value was: `null`.',
                 name: 'ValidationError',
               },
             ],
@@ -240,6 +251,7 @@ describe('CM API - Basic', () => {
         name: 'Product 1',
         description: "I'm a product description that is very long. At least thirty characters.",
       };
+
       const res = await rq({
         method: 'POST',
         url: '/content-manager/collection-types/api::product.product',

@@ -1,6 +1,12 @@
-import { get } from 'lodash/fp';
-import { sanitize, validate, pipeAsync, errors } from '@strapi/utils';
-import type { UID } from '@strapi/types';
+import { merge, property } from 'lodash';
+import {
+  async,
+  contentTypes,
+  errors,
+  buildPublicationFilterWhere,
+  parsePublicationFilter,
+} from '@strapi/utils';
+import type { Internal } from '@strapi/types';
 
 import type { Context } from '../../types';
 
@@ -18,7 +24,7 @@ export default ({ strapi }: Context) => {
       contentTypeUID,
       attributeName,
     }: {
-      contentTypeUID: UID.ContentType;
+      contentTypeUID: Internal.UID.ContentType;
       attributeName: string;
     }) {
       const contentType = strapi.getModel(contentTypeUID);
@@ -38,7 +44,7 @@ export default ({ strapi }: Context) => {
 
       const targetContentType = strapi.getModel(targetUID);
 
-      return async (parent: any, args: any = {}, context: any = {}) => {
+      return async (parent: any, args: any, context: any, info: any) => {
         const { auth } = context.state;
 
         const transformedArgs = transformArgs(args, {
@@ -46,21 +52,128 @@ export default ({ strapi }: Context) => {
           usePagination: true,
         });
 
-        await validate.contentAPI.query(transformedArgs, targetContentType, {
-          auth,
-        });
-        const sanitizedQuery = await sanitize.contentAPI.query(transformedArgs, targetContentType, {
+        await strapi.contentAPI.validate.query(transformedArgs, targetContentType, {
           auth,
         });
 
-        const data = await strapi.entityService!.load(
-          contentTypeUID,
-          parent,
-          attributeName,
-          sanitizedQuery
+        const sanitizedQuery = await strapi.contentAPI.sanitize.query(
+          transformedArgs,
+          targetContentType,
+          {
+            auth,
+          }
         );
+        const transformedQuery = strapi.get('query-params').transform(targetUID, sanitizedQuery);
 
-        const info = {
+        const isTargetDraftAndPublishContentType =
+          contentTypes.hasDraftAndPublish(targetContentType);
+
+        // Helper to check if a field is from built-in queries (not custom resolvers)
+        // Use the precomputed lookup populated by the content-api service at schema build time.
+        const isBuiltInQueryField = (fieldName: string) => {
+          const graphqlService = strapi.plugin('graphql').service('content-api');
+          return graphqlService.isBuiltInQueryField(fieldName);
+        };
+
+        // Walk back to the root of info.path so we pick up the args of *our* query branch
+        let rootPath = info?.path;
+        while (rootPath?.prev) {
+          rootPath = rootPath.prev;
+        }
+        const rootQueryArgs = rootPath ? context.rootQueryArgsByPath?.get(rootPath.key) : undefined;
+
+        const shouldInheritRootQueryStatus =
+          rootQueryArgs?._originField && isBuiltInQueryField(rootQueryArgs._originField);
+
+        // Only inherit status from built-in queries to avoid conflicts with custom resolvers.
+        // Built-in root queries default to published results; draft/preview queries pass `status`.
+        // Nested relations should match that parent query.
+        const inheritedStatus = shouldInheritRootQueryStatus
+          ? rootQueryArgs.status || 'published'
+          : null;
+
+        const statusToApply = args.status || inheritedStatus;
+
+        const defaultFilters =
+          isTargetDraftAndPublishContentType && statusToApply
+            ? {
+                where: {
+                  publishedAt: statusToApply === 'published' ? { $notNull: true } : { $null: true },
+                },
+              }
+            : {};
+
+        const inheritedPublicationFilter =
+          rootQueryArgs?.publicationFilter !== undefined &&
+          rootQueryArgs?._originField &&
+          isBuiltInQueryField(rootQueryArgs._originField)
+            ? rootQueryArgs.publicationFilter
+            : undefined;
+
+        const inheritedHasPublishedVersion =
+          rootQueryArgs?.hasPublishedVersion !== undefined &&
+          rootQueryArgs?._originField &&
+          isBuiltInQueryField(rootQueryArgs._originField)
+            ? rootQueryArgs.hasPublishedVersion
+            : undefined;
+
+        let effectivePublicationFilter: string | undefined = inheritedPublicationFilter;
+        if (
+          effectivePublicationFilter === undefined &&
+          inheritedHasPublishedVersion !== undefined
+        ) {
+          effectivePublicationFilter = inheritedHasPublishedVersion
+            ? 'has-published-version-document'
+            : 'never-published-document';
+        }
+
+        let publicationFilterWhere: Record<string, any> = {};
+        if (isTargetDraftAndPublishContentType && effectivePublicationFilter !== undefined) {
+          let mode;
+          try {
+            mode = parsePublicationFilter(effectivePublicationFilter);
+          } catch {
+            mode = undefined;
+          }
+          if (mode !== undefined) {
+            const meta = strapi.db.metadata.get(targetUID);
+            const st = statusToApply === 'published' ? 'published' : 'draft';
+            const cond = buildPublicationFilterWhere(
+              strapi.db.connection,
+              meta,
+              targetContentType,
+              mode,
+              st
+            );
+            if (cond && Object.keys(cond).length > 0) {
+              publicationFilterWhere = { where: cond };
+            }
+          }
+        }
+
+        const dbQuery = merge({}, defaultFilters, publicationFilterWhere, transformedQuery);
+
+        // Sign media URLs if upload plugin is available and using private provider
+        const data = await (async () => {
+          const rawData = await strapi.db
+            .query(contentTypeUID)
+            .load(parent, attributeName, dbQuery);
+          if (isMediaAttribute && strapi.plugin('upload')) {
+            const { signFileUrls } = strapi.plugin('upload').service('file');
+
+            if (Array.isArray(rawData)) {
+              return async.map(rawData, (item: any) => signFileUrls(item));
+            }
+
+            if (rawData) {
+              return signFileUrls(rawData);
+            }
+          }
+
+          return rawData;
+        })();
+
+        const sanitizeInfo = {
           args: sanitizedQuery,
           resourceUID: targetUID,
         };
@@ -72,12 +185,12 @@ export default ({ strapi }: Context) => {
           // Helpers used for the data cleanup
           const wrapData = (dataToWrap: any) => ({ [attributeName]: dataToWrap });
           const sanitizeData = (dataToSanitize: any) => {
-            return sanitize.contentAPI.output(dataToSanitize, contentType, { auth });
+            return strapi.contentAPI.sanitize.output(dataToSanitize, contentType, { auth });
           };
-          const unwrapData = get(attributeName);
+          const unwrapData = property(attributeName);
 
           // Sanitizer definition
-          const sanitizeMorphAttribute = pipeAsync(wrapData, sanitizeData, unwrapData);
+          const sanitizeMorphAttribute = async.pipe(wrapData, sanitizeData, unwrapData);
 
           return sanitizeMorphAttribute(data);
         }
@@ -85,12 +198,12 @@ export default ({ strapi }: Context) => {
         // If this is a to-many relation, it returns an object that
         // matches what the entity-response-collection's resolvers expect
         if (isToMany) {
-          return toEntityResponseCollection(data, info);
+          return toEntityResponseCollection(data, sanitizeInfo);
         }
 
         // Else, it returns an object that matches
         // what the entity-response's resolvers expect
-        return toEntityResponse(data, info);
+        return toEntityResponse(data, sanitizeInfo);
       };
     },
   };

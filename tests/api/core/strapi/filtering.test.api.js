@@ -4,7 +4,11 @@
 const _ = require('lodash');
 const { createStrapiInstance } = require('api-tests/strapi');
 const { createTestBuilder } = require('api-tests/builder');
-const { createContentAPIRequest, transformToRESTResource } = require('api-tests/request');
+const {
+  createAuthRequest,
+  createContentAPIRequest,
+  transformToRESTResource,
+} = require('api-tests/request');
 
 const builder = createTestBuilder();
 let strapi;
@@ -91,11 +95,43 @@ const productFixtures = [
   },
 ];
 
+// Dedicated content type for LIKE-metacharacter escaping tests. Kept separate
+// from `product` so its fixtures don't affect the count-based product assertions.
+const tag = {
+  attributes: {
+    slug: {
+      type: 'string',
+    },
+  },
+  displayName: 'Tag',
+  singularName: 'tag',
+  pluralName: 'tags',
+  description: '',
+  collectionName: '',
+};
+
+const tagFixtures = [
+  { slug: 'a_c' },
+  { slug: 'abc' },
+  { slug: 'axc' },
+  { slug: '50%' },
+  { slug: '5000' },
+  { slug: '100% pure' },
+  { slug: '1000 pure' },
+  // Literal endsWith('100%') — needed so $endsWith:'100%' is discriminative vs decoy `1000 pure`
+  // (without escaping, LIKE '%100%' matches both `100% pure` and `1000 pure`).
+  { slug: 'rate100%' },
+  { slug: 'Cutting\\' },
+  { slug: 'Cutting-tool' },
+];
+
 describe('Filtering API', () => {
   beforeAll(async () => {
     await builder
       .addContentType(product)
+      .addContentType(tag)
       .addFixtures(product.singularName, productFixtures)
+      .addFixtures(tag.singularName, tagFixtures)
       .build();
 
     strapi = await createStrapiInstance();
@@ -115,6 +151,112 @@ describe('Filtering API', () => {
   });
 
   describe('Basic filters', () => {
+    describe('Filter $and', () => {
+      test('Should return an array with matching entities', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/products',
+          qs: {
+            filters: {
+              $and: [
+                {
+                  name: 'Product 1',
+                },
+                {
+                  rank: 42,
+                },
+              ],
+            },
+          },
+        });
+
+        expect(res.body.data).toEqual(expect.arrayContaining([data.product[0]]));
+      });
+
+      test('Should return an empty array when no match', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/products',
+          qs: {
+            filters: {
+              $and: [
+                {
+                  name: 'Product 1',
+                },
+                {
+                  rank: 43,
+                },
+              ],
+            },
+          },
+        });
+
+        expect(res.body.data).toEqual([]);
+      });
+    });
+
+    describe('Fitler $or', () => {
+      test('Should return an array with matching entities', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/products',
+          qs: {
+            filters: {
+              $or: [
+                {
+                  name: 'Product 1',
+                },
+                {
+                  rank: 82,
+                },
+              ],
+            },
+          },
+        });
+
+        expect(res.body.data).toEqual(expect.arrayContaining([data.product[0], data.product[1]]));
+      });
+
+      test('Should return an empty array when no match', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/products',
+          qs: {
+            filters: {
+              $or: [
+                {
+                  name: 'Product 99',
+                },
+                {
+                  rank: 43,
+                },
+              ],
+            },
+          },
+        });
+
+        expect(res.body.data).toEqual([]);
+      });
+    });
+
+    describe('Filter $not', () => {
+      test('Should return an array with matching entities', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/products',
+          qs: {
+            filters: {
+              $not: {
+                name: 'Product 1',
+              },
+            },
+          },
+        });
+
+        expect(res.body.data).toEqual(expect.arrayContaining(data.product.slice(1)));
+      });
+    });
+
     describe('Filter equals', () => {
       test('Should be the default filter', async () => {
         const res = await rq({
@@ -260,7 +402,7 @@ describe('Filtering API', () => {
           },
         });
 
-        const matching = data.product.filter((x) => x.attributes.price === null);
+        const matching = data.product.filter((x) => x.price === null);
 
         res.body.data.sort((a, b) => (a.id > b.id ? 1 : -1));
         expect(res.body.data.length).toBe(matching.length);
@@ -359,6 +501,42 @@ describe('Filtering API', () => {
       });
     });
 
+    describe('Scalar filter maps ($contains / $containsi)', () => {
+      test('content-API sanitize.query strips invalid keys next to operators under scalar fields', async () => {
+        const schema = strapi.getModel('api::product.product');
+        const sanitized = await strapi.contentAPI.sanitize.query(
+          {
+            filters: {
+              name: {
+                $containsi: 'oduct',
+                __invalidNestedFilterKey: 'should-be-removed',
+              },
+            },
+          },
+          schema,
+          {}
+        );
+
+        expect(sanitized.filters).toEqual({ name: { $containsi: 'oduct' } });
+      });
+
+      test('GET with filters[name][$containsi] matches (qs.stringify bracket keys, curl-equivalent)', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/products',
+          qs: {
+            'filters[name][$containsi]': 'oduct',
+          },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body.data.length).toBeGreaterThanOrEqual(1);
+        expect(res.body.data).toEqual(
+          expect.arrayContaining(data.product.map((o) => expect.objectContaining(o)))
+        );
+      });
+    });
+
     describe('Filter not contains insensitive', () => {
       test('Should return an array of entities on match', async () => {
         const res = await rq({
@@ -414,6 +592,95 @@ describe('Filtering API', () => {
         });
 
         expect(res2.body.data).toEqual(res.body.data);
+      });
+    });
+
+    // Regression tests for GitHub issue #26468: LIKE metacharacters (%, _, \) in a
+    // user-supplied value must be matched literally, and no value may produce an
+    // unhandled 500 (a trailing backslash previously crashed on PostgreSQL).
+    describe('LIKE metacharacter escaping', () => {
+      const filterTags = (slugFilter) =>
+        rq({
+          method: 'GET',
+          url: '/tags',
+          qs: { filters: { slug: slugFilter }, pagination: { pageSize: 100 } },
+        });
+
+      const tagSlugs = (res) => res.body.data.map((row) => row.slug).sort();
+
+      test('$eqi treats _ as a literal, not a single-character wildcard', async () => {
+        const res = await filterTags({ $eqi: 'a_c' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).toEqual(['a_c']);
+      });
+
+      test('$eqi treats % as a literal, not a wildcard', async () => {
+        const res = await filterTags({ $eqi: '50%' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).toEqual(['50%']);
+      });
+
+      test('$eqi stays case-insensitive equality', async () => {
+        const res = await filterTags({ $eqi: 'ABC' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).toEqual(['abc']);
+      });
+
+      test('$eqi with a trailing backslash does not 500', async () => {
+        const res = await filterTags({ $eqi: 'Cutting\\' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).toEqual(['Cutting\\']);
+      });
+
+      test('$nei excludes only the literal case-insensitive match (not LIKE wildcards)', async () => {
+        const res = await filterTags({ $nei: 'a_c' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).not.toContain('a_c');
+        // Without equality rewrite, LIKE wildcards would also drop abc/axc
+        expect(tagSlugs(res)).toEqual(expect.arrayContaining(['abc', 'axc', '50%', 'rate100%']));
+      });
+
+      test('$containsi escapes % so it matches the literal substring', async () => {
+        const res = await filterTags({ $containsi: '100%' });
+
+        expect(res.statusCode).toBe(200);
+        // Matches `100% pure` and `rate100%`; must NOT match decoy `1000 pure`
+        expect(tagSlugs(res)).toEqual(['100% pure', 'rate100%']);
+      });
+
+      test('$startsWith escapes % so it matches literally', async () => {
+        const res = await filterTags({ $startsWith: '50%' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).toEqual(['50%']);
+      });
+
+      // Exact #26468 repro: endsWith = 100% must not behave like contains
+      test('$endsWith escapes % so it matches values that literally end with 100%', async () => {
+        const res = await filterTags({ $endsWith: '100%' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).toEqual(['rate100%']);
+      });
+
+      test('$contains treats _ as a literal, not a single-character wildcard', async () => {
+        const res = await filterTags({ $contains: 'a_c' });
+
+        expect(res.statusCode).toBe(200);
+        // Without escaping, LIKE %a_c% would also match abc / axc
+        expect(tagSlugs(res)).toEqual(['a_c']);
+      });
+
+      test('$contains with a trailing backslash does not 500 and matches literally', async () => {
+        const res = await filterTags({ $contains: 'Cutting\\' });
+
+        expect(res.statusCode).toBe(200);
+        expect(tagSlugs(res)).toEqual(['Cutting\\']);
       });
     });
 
@@ -1288,9 +1555,7 @@ describe('Filtering API', () => {
       });
 
       expect(res.body.data).toEqual(
-        expect.arrayContaining(
-          data.product.slice(0).sort((a, b) => a.attributes.rank - b.attributes.rank)
-        )
+        expect.arrayContaining(data.product.slice(0).sort((a, b) => a.rank - b.rank))
       );
     });
 
@@ -1304,9 +1569,7 @@ describe('Filtering API', () => {
       });
 
       expect(res.body.data).toEqual(
-        expect.arrayContaining(
-          data.product.slice(0).sort((a, b) => a.attributes.rank - b.attributes.rank)
-        )
+        expect.arrayContaining(data.product.slice(0).sort((a, b) => a.rank - b.rank))
       );
 
       const res2 = await rq({
@@ -1318,9 +1581,7 @@ describe('Filtering API', () => {
       });
 
       expect(res2.body.data).toEqual(
-        expect.arrayContaining(
-          data.product.slice(0).sort((a, b) => b.attributes.rank - a.attributes.rank)
-        )
+        expect.arrayContaining(data.product.slice(0).sort((a, b) => b.rank - a.rank))
       );
     });
 
@@ -1536,6 +1797,68 @@ describe('Filtering API', () => {
           },
         });
         expect(res.body.data).toEqual(expect.arrayContaining([data.product[1], data.product[3]]));
+      });
+
+      test.each(['FALSE', 'False', 'F'])(
+        'Cast falsy booleans case-insensitively %s',
+        async (val) => {
+          const res = await rq({
+            method: 'GET',
+            url: '/products',
+            qs: {
+              filters: {
+                isChecked: {
+                  $eq: val,
+                },
+              },
+            },
+          });
+
+          expect(res.statusCode).toBe(200);
+          expect(res.body.data).toHaveLength(2);
+          expect(res.body.data).toEqual(expect.arrayContaining([data.product[1], data.product[3]]));
+        }
+      );
+
+      test.each(['no', 'yes', 'on', 'off', '', ' true ', '2'])(
+        'Reject unrecognised boolean %j with a 400',
+        async (val) => {
+          const res = await rq({
+            method: 'GET',
+            url: '/products',
+            qs: {
+              filters: {
+                isChecked: {
+                  $eq: val,
+                },
+              },
+            },
+          });
+
+          expect(res.statusCode).toBe(400);
+          expect(res.body.error).toMatchObject({ status: 400, name: 'ValidationError' });
+        }
+      );
+
+      // The admin users list queries strapi.db.query directly, so the database error
+      // reaches the global error middleware instead of the document service.
+      test('Reject unrecognised boolean with a 400 on a route querying the database directly', async () => {
+        const adminRq = await createAuthRequest({ strapi });
+
+        const res = await adminRq({
+          method: 'GET',
+          url: '/admin/users',
+          qs: {
+            filters: {
+              isActive: {
+                $eq: 'no',
+              },
+            },
+          },
+        });
+
+        expect(res.statusCode).toBe(400);
+        expect(res.body.error).toMatchObject({ status: 400, name: 'ValidationError' });
       });
     });
 

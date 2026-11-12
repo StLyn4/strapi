@@ -1,37 +1,23 @@
 import * as React from 'react';
 
-import {
-  Box,
-  Button,
-  ContentLayout,
-  Flex,
-  Grid,
-  GridItem,
-  HeaderLayout,
-  Layout,
-  Link,
-  Main,
-  Typography,
-} from '@strapi/design-system';
-import {
-  SettingsPageTitle,
-  useAppInfo,
-  useFocusWhenNavigate,
-  useRBAC,
-  useTracking,
-} from '@strapi/helper-plugin';
-import { Check, ExternalLink } from '@strapi/icons';
+import { Badge, Box, Button, Flex, Grid, Typography } from '@strapi/design-system';
+import { Check } from '@strapi/icons';
 import { useIntl } from 'react-intl';
 import { useSelector } from 'react-redux';
 
+import { Layouts } from '../../../../components/Layouts/Layout';
+import { Page } from '../../../../components/PageHelpers';
+import { useAppInfo } from '../../../../features/AppInfo';
 import { useConfiguration } from '../../../../features/Configuration';
-import { useEnterprise } from '../../../../hooks/useEnterprise';
+import { useTracking } from '../../../../features/Tracking';
+import { useRBAC } from '../../../../hooks/useRBAC';
 import { selectAdminPermissions } from '../../../../selectors';
 
 import { LogoInput, LogoInputProps } from './components/LogoInput';
+import { PlanCard } from './components/PlanCard';
+import { SupportCard } from './components/SupportCard';
+import { UpgradeBanner } from './components/UpgradeBanner';
 import { DIMENSION, SIZE } from './utils/constants';
-
-const AdminSeatInfoCE = () => null;
 
 /* -------------------------------------------------------------------------------------------------
  * ApplicationInfoPage
@@ -44,29 +30,24 @@ const ApplicationInfoPage = () => {
   const [logos, setLogos] = React.useState({ menu: serverLogos.menu, auth: serverLogos.auth });
   const { settings } = useSelector(selectAdminPermissions);
 
-  const {
-    communityEdition,
-    latestStrapiReleaseTag,
-    nodeVersion,
-    shouldUpdateStrapi,
-    strapiVersion,
-  } = useAppInfo();
-
-  const AdminSeatInfo = useEnterprise(
-    AdminSeatInfoCE,
-    async () =>
-      (
-        await import(
-          '../../../../../../ee/admin/src/pages/SettingsPage/pages/ApplicationInfoPage/components/AdminSeatInfo'
-        )
-      ).AdminSeatInfoEE
+  const nodeVersion = useAppInfo('ApplicationInfoPage', (state) => state.nodeVersion);
+  const strapiUpdateSeverity = useAppInfo(
+    'ApplicationInfoPage',
+    (state) => state.strapiUpdateSeverity
   );
+  const strapiReleasesBehind = useAppInfo(
+    'ApplicationInfoPage',
+    (state) => state.strapiReleasesBehind
+  );
+  const isStrapiMajorBehind = useAppInfo(
+    'ApplicationInfoPage',
+    (state) => state.isStrapiMajorBehind
+  );
+  const strapiVersion = useAppInfo('ApplicationInfoPage', (state) => state.strapiVersion);
 
   const {
     allowedActions: { canRead, canUpdate },
   } = useRBAC(settings ? settings['project-settings'] : {});
-
-  useFocusWhenNavigate();
 
   const handleSubmit: React.FormEventHandler<HTMLFormElement> = (e) => {
     e.preventDefault();
@@ -105,25 +86,25 @@ const ApplicationInfoPage = () => {
     });
   }, [serverLogos]);
 
-  // block rendering until the EE component is fully loaded
-  if (!AdminSeatInfo) {
-    return null;
-  }
-
   const isSaveDisabled =
     logos.auth.custom === serverLogos.auth.custom && logos.menu.custom === serverLogos.menu.custom;
 
   return (
-    <Layout>
-      <SettingsPageTitle
-        name={formatMessage({
-          id: 'Settings.application.header',
-          defaultMessage: 'Application',
-        })}
-      />
-      <Main>
+    <>
+      <Page.Title>
+        {formatMessage(
+          { id: 'Settings.PageTitle', defaultMessage: 'Settings - {name}' },
+          {
+            name: formatMessage({
+              id: 'Settings.application.header',
+              defaultMessage: 'Application',
+            }),
+          }
+        )}
+      </Page.Title>
+      <Page.Main>
         <form onSubmit={handleSubmit}>
-          <HeaderLayout
+          <Layouts.Header
             title={formatMessage({
               id: 'Settings.application.title',
               defaultMessage: 'Overview',
@@ -134,14 +115,15 @@ const ApplicationInfoPage = () => {
             })}
             primaryAction={
               canUpdate && (
-                <Button disabled={isSaveDisabled} type="submit" startIcon={<Check />}>
+                <Button disabled={isSaveDisabled} type="submit" startIcon={<Check />} fullWidth>
                   {formatMessage({ id: 'global.save', defaultMessage: 'Save' })}
                 </Button>
               )
             }
           />
-          <ContentLayout>
+          <Layouts.Content>
             <Flex direction="column" alignItems="stretch" gap={6}>
+              <UpgradeBanner />
               <Flex
                 direction="column"
                 alignItems="stretch"
@@ -154,75 +136,62 @@ const ApplicationInfoPage = () => {
                 paddingRight={7}
                 paddingLeft={7}
               >
-                <Typography variant="delta" as="h3">
+                <Typography variant="delta" tag="h3">
                   {formatMessage({
                     id: 'global.details',
                     defaultMessage: 'Details',
                   })}
                 </Typography>
 
-                <Grid gap={5} as="dl">
-                  <GridItem col={6} s={12}>
-                    <Typography variant="sigma" textColor="neutral600" as="dt">
+                <Grid.Root gap={5} tag="dl">
+                  <Grid.Item col={6} xs={12} direction="column" alignItems="start">
+                    <Typography variant="sigma" textColor="neutral600" tag="dt">
                       {formatMessage({
                         id: 'Settings.application.strapiVersion',
                         defaultMessage: 'strapi version',
                       })}
                     </Typography>
-                    <Flex gap={3} direction="column" alignItems="start" as="dd">
+                    <Flex gap={2} alignItems="center" wrap="wrap" tag="dd">
                       <Typography>v{strapiVersion}</Typography>
-                      {shouldUpdateStrapi && (
-                        <Link
-                          href={`https://github.com/strapi/strapi/releases/tag/${latestStrapiReleaseTag}`}
-                          endIcon={<ExternalLink />}
-                        >
+                      {strapiUpdateSeverity === 'default' && (
+                        <Badge variant="primary">
                           {formatMessage({
-                            id: 'Settings.application.link-upgrade',
-                            defaultMessage: 'Upgrade your admin panel',
+                            id: 'Settings.application.update-badge.available',
+                            defaultMessage: 'Update available',
                           })}
-                        </Link>
+                        </Badge>
+                      )}
+                      {strapiUpdateSeverity === 'urgent' && (
+                        <Badge variant="warning">
+                          {isStrapiMajorBehind
+                            ? formatMessage({
+                                id: 'Settings.application.update-badge.major-behind',
+                                defaultMessage: 'Major update available',
+                              })
+                            : formatMessage(
+                                {
+                                  id: 'Settings.application.update-badge.releases-behind',
+                                  defaultMessage:
+                                    '{count, plural, one {# minor version} other {# minor versions}} behind',
+                                },
+                                { count: strapiReleasesBehind }
+                              )}
+                        </Badge>
                       )}
                     </Flex>
-                  </GridItem>
-                  <GridItem col={6} s={12}>
-                    <Typography variant="sigma" textColor="neutral600" as="dt">
-                      {formatMessage({
-                        id: 'Settings.application.edition-title',
-                        defaultMessage: 'current plan',
-                      })}
-                    </Typography>
-                    <Flex gap={3} direction="column" alignItems="start" as="dd">
-                      <Typography>
-                        {formatMessage(
-                          {
-                            id: 'Settings.application.ee-or-ce',
-                            defaultMessage:
-                              '{communityEdition, select, true {Community Edition} other {Enterprise Edition}}',
-                          },
-                          { communityEdition }
-                        )}
-                      </Typography>
-                      <Link href="https://strapi.io/pricing-self-hosted" endIcon={<ExternalLink />}>
-                        {formatMessage({
-                          id: 'Settings.application.link-pricing',
-                          defaultMessage: 'See all pricing plans',
-                        })}
-                      </Link>
-                    </Flex>
-                  </GridItem>
-
-                  <GridItem col={6} s={12}>
-                    <Typography variant="sigma" textColor="neutral600" as="dt">
+                  </Grid.Item>
+                  <Grid.Item col={6} xs={12} direction="column" alignItems="start">
+                    <Typography variant="sigma" textColor="neutral600" tag="dt">
                       {formatMessage({
                         id: 'Settings.application.node-version',
                         defaultMessage: 'node version',
                       })}
                     </Typography>
-                    <Typography as="dd">{nodeVersion}</Typography>
-                  </GridItem>
-                  <AdminSeatInfo />
-                </Grid>
+                    <Typography tag="dd">{nodeVersion}</Typography>
+                  </Grid.Item>
+                </Grid.Root>
               </Flex>
+              <PlanCard />
               {canRead && (
                 <Box
                   hasRadius
@@ -233,7 +202,7 @@ const ApplicationInfoPage = () => {
                   paddingRight={7}
                   paddingLeft={7}
                 >
-                  <Typography variant="delta" as="h3">
+                  <Typography variant="delta" tag="h3">
                     {formatMessage({
                       id: 'Settings.application.customization',
                       defaultMessage: 'Customization',
@@ -249,8 +218,8 @@ const ApplicationInfoPage = () => {
                       { dimension: DIMENSION, size: SIZE }
                     )}
                   </Typography>
-                  <Grid paddingTop={4} gap={4}>
-                    <GridItem col={6} s={12}>
+                  <Grid.Root paddingTop={4} gap={4}>
+                    <Grid.Item col={6} xs={12} direction="column" alignItems="stretch">
                       <LogoInput
                         canUpdate={canUpdate}
                         customLogo={logos.menu.custom}
@@ -265,8 +234,8 @@ const ApplicationInfoPage = () => {
                         })}
                         onChangeLogo={handleChangeLogo('menu')}
                       />
-                    </GridItem>
-                    <GridItem col={6} s={12}>
+                    </Grid.Item>
+                    <Grid.Item col={6} xs={12} direction="column" alignItems="stretch">
                       <LogoInput
                         canUpdate={canUpdate}
                         customLogo={logos.auth.custom}
@@ -281,15 +250,16 @@ const ApplicationInfoPage = () => {
                         })}
                         onChangeLogo={handleChangeLogo('auth')}
                       />
-                    </GridItem>
-                  </Grid>
+                    </Grid.Item>
+                  </Grid.Root>
                 </Box>
               )}
+              <SupportCard />
             </Flex>
-          </ContentLayout>
+          </Layouts.Content>
         </form>
-      </Main>
-    </Layout>
+      </Page.Main>
+    </>
   );
 };
 

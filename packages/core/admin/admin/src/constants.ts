@@ -1,6 +1,6 @@
-import { StrapiAppSettingLink } from '@strapi/helper-plugin';
-
 import { PermissionMap } from './types/permissions';
+
+import type { StrapiAppSettingLink } from './core/apis/router';
 
 export const ADMIN_PERMISSIONS_CE = {
   contentManager: {
@@ -70,6 +70,14 @@ export const ADMIN_PERMISSIONS_CE = {
       ],
       update: [{ action: 'admin::webhooks.update', subject: null }],
     },
+    'admin-tokens': {
+      main: [{ action: 'admin::admin-tokens.access', subject: null }],
+      create: [{ action: 'admin::admin-tokens.create', subject: null }],
+      delete: [{ action: 'admin::admin-tokens.delete', subject: null }],
+      read: [{ action: 'admin::admin-tokens.read', subject: null }],
+      update: [{ action: 'admin::admin-tokens.update', subject: null }],
+      regenerate: [{ action: 'admin::admin-tokens.regenerate', subject: null }],
+    },
     'api-tokens': {
       main: [{ action: 'admin::api-tokens.access', subject: null }],
       create: [{ action: 'admin::api-tokens.create', subject: null }],
@@ -90,6 +98,14 @@ export const ADMIN_PERMISSIONS_CE = {
       read: [{ action: 'admin::project-settings.read', subject: null }],
       update: [{ action: 'admin::project-settings.update', subject: null }],
     },
+    'debug-dump': {
+      main: [{ action: 'admin::debug-dump.read', subject: null }],
+      read: [{ action: 'admin::debug-dump.read', subject: null }],
+    },
+    plugins: {
+      main: [{ action: 'admin::marketplace.read', subject: null }],
+      read: [{ action: 'admin::marketplace.read', subject: null }],
+    },
   },
 } satisfies Partial<PermissionMap>;
 
@@ -100,6 +116,13 @@ export const HOOKS = {
    * @type {string}
    */
   INJECT_COLUMN_IN_TABLE: 'Admin/CM/pages/ListView/inject-column-in-table',
+
+  /**
+   * Hook that allows to mutate the displayed filters of the list view
+   * @constant
+   * @type {string}
+   */
+  INJECT_LIST_VIEW_FILTERS: 'Admin/CM/pages/ListView/inject-in-filters',
 
   /**
    * Hook that allows to mutate the CM's collection types links pre-set filters
@@ -123,9 +146,11 @@ export const HOOKS = {
   MUTATE_SINGLE_TYPES_LINKS: 'Admin/CM/pages/App/mutate-single-types-links',
 };
 
-export interface SettingsMenuLink
-  extends Omit<StrapiAppSettingLink, 'Component' | 'permissions' | 'lockIcon'> {
-  lockIcon?: boolean;
+export interface SettingsMenuLink extends Omit<
+  StrapiAppSettingLink,
+  'Component' | 'permissions' | 'licenseOnly'
+> {
+  licenseOnly?: boolean;
 }
 
 export type SettingsMenu = {
@@ -155,6 +180,14 @@ export const SETTINGS_LINKS_CE = (): SettingsMenu => ({
       to: '/settings/transfer-tokens?sort=name:ASC',
       id: 'transfer-tokens',
     },
+    {
+      intlLabel: {
+        id: 'global.plugins',
+        defaultMessage: 'Plugins',
+      },
+      to: '/settings/list-plugins',
+      id: 'plugins',
+    },
     // If the Enterprise/Cloud feature is not enabled and if the config doesn't disable it, we promote the Enterprise/Cloud feature by displaying them in the settings menu.
     // Disable this by adding "promoteEE: false" to your `./config/admin.js` file
     ...(!window.strapi.features.isEnabled(window.strapi.features.SSO) &&
@@ -164,22 +197,17 @@ export const SETTINGS_LINKS_CE = (): SettingsMenu => ({
             intlLabel: { id: 'Settings.sso.title', defaultMessage: 'Single Sign-On' },
             to: '/settings/purchase-single-sign-on',
             id: 'sso-purchase-page',
-            lockIcon: true,
+            licenseOnly: true,
           },
         ]
       : []),
-
-    ...(!window.strapi.features.isEnabled(window.strapi.features.REVIEW_WORKFLOWS) &&
-    window.strapi?.flags?.promoteEE
+    ...(!window.strapi.features.isEnabled('cms-content-history') && window.strapi?.flags?.promoteEE
       ? [
           {
-            intlLabel: {
-              id: 'Settings.review-workflows.page.title',
-              defaultMessage: 'Review Workflows',
-            },
-            to: '/settings/purchase-review-workflows',
-            id: 'review-workflows-purchase-page',
-            lockIcon: true,
+            intlLabel: { id: 'Settings.content-history.title', defaultMessage: 'Content History' },
+            to: '/settings/purchase-content-history',
+            id: 'content-history-purchase-page',
+            licenseOnly: true,
           },
         ]
       : []),
@@ -197,6 +225,11 @@ export const SETTINGS_LINKS_CE = (): SettingsMenu => ({
       to: '/settings/users?pageSize=10&page=1&sort=firstname',
       id: 'users',
     },
+    {
+      intlLabel: { id: 'Settings.adminTokens.title', defaultMessage: 'Admin Tokens' },
+      to: '/settings/admin-tokens',
+      id: 'admin-tokens',
+    },
     ...(!window.strapi.features.isEnabled(window.strapi.features.AUDIT_LOGS) &&
     window.strapi?.flags?.promoteEE
       ? [
@@ -204,7 +237,7 @@ export const SETTINGS_LINKS_CE = (): SettingsMenu => ({
             intlLabel: { id: 'global.auditLogs', defaultMessage: 'Audit Logs' },
             to: '/settings/purchase-audit-logs',
             id: 'auditLogs-purchase-page',
-            lockIcon: true,
+            licenseOnly: true,
           },
         ]
       : []),

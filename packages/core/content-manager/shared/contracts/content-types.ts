@@ -1,6 +1,8 @@
-import { Schema } from '@strapi/types';
+import type { Struct } from '@strapi/types';
 import { errors } from '@strapi/utils';
 import { ComponentConfiguration } from './components';
+
+export type RelationOpenMode = 'modal' | 'page' | 'newTab';
 
 export type Settings = {
   bulkable: boolean;
@@ -10,6 +12,12 @@ export type Settings = {
   mainField: string;
   defaultSortBy: string;
   defaultSortOrder: string;
+  relationOpenMode?: RelationOpenMode;
+  /**
+   * Entries are arranged by hand in the list view, and the Content API returns them in that
+   * order when no sort is requested. Collection types only.
+   */
+  customOrder?: boolean;
 };
 
 export type Metadatas = {
@@ -23,6 +31,7 @@ export type Metadatas = {
     };
     list: {
       label?: string;
+      mainField?: string;
       searchable?: boolean;
       sortable?: boolean;
     };
@@ -39,9 +48,15 @@ export type Configuration = {
   settings: Settings;
   metadatas: Metadatas;
   layouts: Layouts;
+  options?: object;
+  /**
+   * Old attribute name to its current name. The list view applies this to the
+   * column list stored in the browser, which the server cannot edit.
+   */
+  attributeRenames?: Record<string, string>;
 };
 
-export interface ContentType extends Schema.ContentType {
+export interface ContentType extends Struct.ContentTypeSchema {
   isDisplayed: boolean;
   apiID: string;
 }

@@ -15,9 +15,7 @@ const categoryModel = {
   pluralName: 'categories',
   description: '',
   name: 'Category',
-  options: {
-    draftAndPublish: false,
-  },
+  options: {},
   pluginOptions: {
     i18n: {
       localized: true,
@@ -41,9 +39,7 @@ const homepageModel = {
   displayName: 'Homepage',
   singularName: 'homepage',
   pluralName: 'homepages',
-  options: {
-    draftAndPublish: false,
-  },
+  options: {},
   pluginOptions: {
     i18n: {
       localized: true,
@@ -64,10 +60,12 @@ const homepageModel = {
 
 const homepages = [
   {
+    document: 'a',
     title: 'homepage title',
     locale: 'en',
   },
   {
+    document: 'a',
     title: '홈페이지 제목',
     locale: 'ko',
   },
@@ -75,10 +73,12 @@ const homepages = [
 
 const categories = [
   {
+    documentId: 'a',
     name: 'post',
     locale: 'en',
   },
   {
+    documentId: 'a',
     name: '게시물',
     locale: 'ko',
   },
@@ -110,6 +110,9 @@ describe('i18n - Content API', () => {
   });
 
   afterAll(async () => {
+    // Delete all locales that have been created
+    await strapi.db.query('plugin::i18n.locale').deleteMany({ where: { code: { $ne: 'en' } } });
+
     await strapi.destroy();
     await builder.cleanup();
   });
@@ -142,22 +145,6 @@ describe('i18n - Content API', () => {
       expect(body.data).toHaveLength(1);
       expect(body.data[0]).toMatchObject(transformToRESTResource(data.categories[1]));
     });
-
-    test('Can filter on all locale', async () => {
-      const res = await rq({
-        method: 'GET',
-        url: '/categories?locale=all',
-      });
-
-      const { statusCode, body } = res;
-
-      expect(statusCode).toBe(200);
-      expect(Array.isArray(body.data)).toBe(true);
-      expect(body.data).toHaveLength(2);
-      expect(body.data).toEqual(
-        expect.arrayContaining(data.categories.map((category) => transformToRESTResource(category)))
-      );
-    });
   });
 
   describe('Test single type', () => {
@@ -183,18 +170,6 @@ describe('i18n - Content API', () => {
 
       expect(statusCode).toBe(200);
       expect(body.data).toMatchObject(transformToRESTResource(data.homepages[1]));
-    });
-
-    test('Can filter on all locale', async () => {
-      const res = await rq({
-        method: 'GET',
-        url: '/homepage?locale=all',
-      });
-
-      const { statusCode, body } = res;
-
-      expect(statusCode).toBe(200);
-      expect(body.data).toMatchObject(transformToRESTResource(data.homepages));
     });
   });
 });

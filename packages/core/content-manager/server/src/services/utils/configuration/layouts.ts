@@ -38,7 +38,7 @@ async function createDefaultLayouts(schema: any) {
 
 function createDefaultListLayout(schema: any) {
   return Object.keys(schema.attributes)
-    .filter((name) => isListable(schema, name))
+    .filter((name) => isListable(schema, name) && name !== 'documentId')
     .slice(0, DEFAULT_LIST_LENGTH);
 }
 
@@ -67,9 +67,9 @@ function syncLayouts(configuration: any, schema: any) {
   // backward compatibility with when relations were on the side of the layout
   // it migrates the displayed relations to the main edit layout
   const elementsToReAppend = [...cleanEditRelations];
-  let cleanEdit = [];
+  let cleanEdit: unknown[] = [];
   for (const row of edit) {
-    const newRow = [];
+    const newRow: unknown[] = [];
 
     for (const el of row) {
       if (!hasEditableAttribute(schema, el.name)) continue;

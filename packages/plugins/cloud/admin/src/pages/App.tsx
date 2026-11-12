@@ -5,20 +5,24 @@
  *
  */
 
-import { AnErrorOccurred } from '@strapi/helper-plugin';
-import { Switch, Route } from 'react-router-dom';
-
-import { pluginId } from '../pluginId';
+import { Page, useAppInfo } from '@strapi/strapi/admin';
+import { Navigate, Routes, Route } from 'react-router-dom';
 
 import { HomePage } from './HomePage';
 
 const App = () => {
+  const currentEnvironment = useAppInfo('CloudApp', (state) => state.currentEnvironment);
+
+  if (currentEnvironment === 'production') {
+    return <Navigate to="/" replace />;
+  }
+
   return (
     <div>
-      <Switch>
-        <Route path={`/plugins/${pluginId}`} component={HomePage} exact />
-        <Route component={AnErrorOccurred} />
-      </Switch>
+      <Routes>
+        <Route index element={<HomePage />} />
+        <Route path="*" element={<Page.Error />} />
+      </Routes>
     </div>
   );
 };

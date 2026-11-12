@@ -1,27 +1,21 @@
-import { subject as asSubject, detectSubjectType } from '@casl/ability';
-import { permittedFieldsOf } from '@casl/ability/extra';
-import {
-  defaults,
-  omit,
-  isArray,
-  isEmpty,
-  isNil,
-  flatMap,
-  some,
-  prop,
-  uniq,
-  intersection,
-  pick,
-  getOr,
-  isObject,
-  cloneDeep,
-} from 'lodash/fp';
+import { omit, pick, defaults, isEmpty, intersection, get, isObject, cloneDeep } from 'lodash';
+import { subject as asSubject } from '@casl/ability';
 
-import { contentTypes, traverseEntity, sanitize, pipeAsync, traverse } from '@strapi/utils';
+import type { UID } from '@strapi/types';
+
+import {
+  contentTypes,
+  traverseEntity,
+  sanitize,
+  async,
+  traverse,
+  createModelCache,
+} from '@strapi/utils';
+import { createPermissionFieldsCache } from './permission-fields';
 import { ADMIN_USER_ALLOWED_FIELDS } from '../../../domain/user';
 
 const {
-  visitors: { removePassword },
+  visitors: { removePassword, expandWildcardPopulate },
 } = sanitize;
 
 const {
@@ -33,6 +27,7 @@ const {
 } = contentTypes;
 const {
   ID_ATTRIBUTE,
+  DOC_ID_ATTRIBUTE,
   CREATED_AT_ATTRIBUTE,
   UPDATED_AT_ATTRIBUTE,
   PUBLISHED_AT_ATTRIBUTE,
@@ -41,12 +36,20 @@ const {
 } = constants;
 
 const COMPONENT_FIELDS = ['__component'];
-const STATIC_FIELDS = [ID_ATTRIBUTE];
+const STATIC_FIELDS = [ID_ATTRIBUTE, DOC_ID_ATTRIBUTE];
 
 export default ({ action, ability, model }: any) => {
   const schema = strapi.getModel(model);
 
   const { removeDisallowedFields } = sanitize.visitors;
+
+  // Create request-scoped model cache to avoid redundant getModel() calls
+  const modelCache = createModelCache(strapi.getModel.bind(strapi));
+
+  const ctx = {
+    schema,
+    getModel: modelCache.getModel,
+  };
 
   const createSanitizeQuery = (options = {} as any) => {
     const { fields } = options;
@@ -54,67 +57,94 @@ export default ({ action, ability, model }: any) => {
     // TODO: sanitize relations to admin users in all sanitizers
     const permittedFields = fields.shouldIncludeAll ? null : getQueryFields(fields.permitted);
 
-    const sanitizeFilters = pipeAsync(
-      traverse.traverseQueryFilters(removeDisallowedFields(permittedFields), { schema }),
-      traverse.traverseQueryFilters(omitDisallowedAdminUserFields, { schema }),
-      traverse.traverseQueryFilters(omitHiddenFields, { schema }),
-      traverse.traverseQueryFilters(removePassword, { schema }),
-      traverse.traverseQueryFilters(
-        ({ key, value }, { remove }) => {
+    const createSanitizeFilters = (ctx: any) =>
+      async.pipe(
+        traverse.traverseQueryFilters(removeDisallowedFields(permittedFields), ctx),
+        traverse.traverseQueryFilters(omitDisallowedAdminUserFields, ctx),
+        traverse.traverseQueryFilters(omitHiddenFields, ctx),
+        traverse.traverseQueryFilters(removePassword, ctx),
+        traverse.traverseQueryFilters(({ key, value }, { remove }) => {
           if (isObject(value) && isEmpty(value)) {
             remove(key);
           }
-        },
-        { schema }
-      )
-    );
+        }, ctx)
+      );
 
-    const sanitizeSort = pipeAsync(
-      traverse.traverseQuerySort(removeDisallowedFields(permittedFields), { schema }),
-      traverse.traverseQuerySort(omitDisallowedAdminUserFields, { schema }),
-      traverse.traverseQuerySort(omitHiddenFields, { schema }),
-      traverse.traverseQuerySort(removePassword, { schema }),
-      traverse.traverseQuerySort(
-        ({ key, attribute, value }, { remove }) => {
+    const createSanitizeSort = (ctx: any) =>
+      async.pipe(
+        traverse.traverseQuerySort(removeDisallowedFields(permittedFields), ctx),
+        traverse.traverseQuerySort(omitDisallowedAdminUserFields, ctx),
+        traverse.traverseQuerySort(omitHiddenFields, ctx),
+        traverse.traverseQuerySort(removePassword, ctx),
+        traverse.traverseQuerySort(({ key, attribute, value }, { remove }) => {
           if (!isScalarAttribute(attribute) && isEmpty(value)) {
             remove(key);
           }
-        },
-        { schema }
-      )
-    );
+        }, ctx)
+      );
 
-    const sanitizePopulate = pipeAsync(
-      traverse.traverseQueryPopulate(removeDisallowedFields(permittedFields), { schema }),
-      traverse.traverseQueryPopulate(omitDisallowedAdminUserFields, { schema }),
-      traverse.traverseQueryPopulate(omitHiddenFields, { schema }),
-      traverse.traverseQueryPopulate(removePassword, { schema })
-    );
+    const createSanitizeFields = (ctx: any) =>
+      async.pipe(
+        traverse.traverseQueryFields(removeDisallowedFields(permittedFields), ctx),
+        traverse.traverseQueryFields(omitHiddenFields, ctx),
+        traverse.traverseQueryFields(removePassword, ctx)
+      );
 
-    const sanitizeFields = pipeAsync(
-      traverse.traverseQueryFields(removeDisallowedFields(permittedFields), { schema }),
-      traverse.traverseQueryFields(omitHiddenFields, { schema }),
-      traverse.traverseQueryFields(removePassword, { schema })
+    const sanitizeFilters = createSanitizeFilters(ctx);
+    const sanitizeSort = createSanitizeSort(ctx);
+    const sanitizeFields = createSanitizeFields(ctx);
+
+    /** Sanitize nested filters, sort, and fields inside populate. */
+    const sanitizeNestedPopulate = async (
+      { key, value, schema, attribute, getModel }: any,
+      { set }: any
+    ) => {
+      if (attribute) {
+        return;
+      }
+
+      const nestedCtx = { schema, getModel };
+
+      if (key === 'sort') {
+        const sanitizedSort = await createSanitizeSort(nestedCtx)(value);
+        set(key, sanitizedSort);
+      }
+
+      if (key === 'filters') {
+        const sanitizedFilters = await createSanitizeFilters(nestedCtx)(value);
+        set(key, sanitizedFilters);
+      }
+
+      if (key === 'fields') {
+        const sanitizedFields = await createSanitizeFields(nestedCtx)(value);
+        set(key, sanitizedFields);
+      }
+    };
+
+    const sanitizePopulate = async.pipe(
+      traverse.traverseQueryPopulate(expandWildcardPopulate, ctx),
+      traverse.traverseQueryPopulate(removeDisallowedFields(permittedFields), ctx),
+      traverse.traverseQueryPopulate(omitDisallowedAdminUserFields, ctx),
+      traverse.traverseQueryPopulate(omitHiddenFields, ctx),
+      traverse.traverseQueryPopulate(removePassword, ctx),
+      traverse.traverseQueryPopulate(sanitizeNestedPopulate, ctx)
     );
 
     return async (query: any) => {
       const sanitizedQuery = cloneDeep(query);
 
-      if (query.filters) {
-        Object.assign(sanitizedQuery, { filters: await sanitizeFilters(query.filters) });
-      }
+      const [sanitizedFilters, sanitizedSort, sanitizedPopulate, sanitizedFields] =
+        await Promise.all([
+          query.filters ? sanitizeFilters(query.filters) : undefined,
+          query.sort ? sanitizeSort(query.sort) : undefined,
+          query.populate ? sanitizePopulate(query.populate) : undefined,
+          query.fields ? sanitizeFields(query.fields) : undefined,
+        ]);
 
-      if (query.sort) {
-        Object.assign(sanitizedQuery, { sort: await sanitizeSort(query.sort) });
-      }
-
-      if (query.populate) {
-        Object.assign(sanitizedQuery, { populate: await sanitizePopulate(query.populate) });
-      }
-
-      if (query.fields) {
-        Object.assign(sanitizedQuery, { fields: await sanitizeFields(query.fields) });
-      }
+      if (sanitizedFilters !== undefined) sanitizedQuery.filters = sanitizedFilters;
+      if (sanitizedSort !== undefined) sanitizedQuery.sort = sanitizedSort;
+      if (sanitizedPopulate !== undefined) sanitizedQuery.populate = sanitizedPopulate;
+      if (sanitizedFields !== undefined) sanitizedQuery.fields = sanitizedFields;
 
       return sanitizedQuery;
     };
@@ -125,16 +155,20 @@ export default ({ action, ability, model }: any) => {
 
     const permittedFields = fields.shouldIncludeAll ? null : getOutputFields(fields.permitted);
 
-    return pipeAsync(
+    return async.pipe(
       // Remove fields hidden from the admin
-      traverseEntity(omitHiddenFields, { schema }),
+      traverseEntity(omitHiddenFields, ctx),
       // Remove unallowed fields from admin::user relations
-      // @ts-expect-error lodash types
-      traverseEntity(pickAllowedAdminUserFields, { schema }),
+      traverseEntity(pickAllowedAdminUserFields, ctx),
       // Remove not allowed fields (RBAC)
-      traverseEntity(removeDisallowedFields(permittedFields), { schema }),
+      traverseEntity(removeDisallowedFields(permittedFields), ctx),
       // Remove all fields of type 'password'
-      sanitize.sanitizers.sanitizePasswords(schema)
+      sanitize.sanitizers.sanitizePasswords({
+        schema,
+        getModel(uid: string) {
+          return strapi.getModel(uid as UID.Schema);
+        },
+      })
     );
   };
 
@@ -143,41 +177,40 @@ export default ({ action, ability, model }: any) => {
 
     const permittedFields = fields.shouldIncludeAll ? null : getInputFields(fields.permitted);
 
-    return pipeAsync(
+    return async.pipe(
       // Remove fields hidden from the admin
-      traverseEntity(omitHiddenFields, { schema }),
+      traverseEntity(omitHiddenFields, ctx),
       // Remove not allowed fields (RBAC)
-      // @ts-expect-error lodash types
-      traverseEntity(removeDisallowedFields(permittedFields), { schema }),
-      // Remove roles from createdBy & updateBy fields
+      traverseEntity(removeDisallowedFields(permittedFields), ctx),
+      // Remove roles from createdBy & updatedBy fields
       omitCreatorRoles
     );
   };
 
   const wrapSanitize = (createSanitizeFunction: any) => {
-    // TODO
-    // @ts-expect-error define the correct return type
-    const wrappedSanitize = async (data: unknown, options = {} as any) => {
-      if (isArray(data)) {
+    const { getPermissionFields } = createPermissionFieldsCache(ability);
+
+    /**
+     * The result keeps the type of `data` (`unknown` stays `unknown`), so callers can type
+     * their sanitized data. At runtime, fields the user is not allowed to see are removed.
+     */
+    function wrappedSanitize<T>(data: T, options?: any): Promise<T>;
+    async function wrappedSanitize(data: unknown, options = {} as any): Promise<unknown> {
+      if (Array.isArray(data)) {
         return Promise.all(data.map((entity: unknown) => wrappedSanitize(entity, options)));
       }
 
       const { subject, action: actionOverride } = getDefaultOptions(data, options);
 
-      const permittedFields = permittedFieldsOf(ability, actionOverride, subject, {
-        fieldsFrom: (rule) => rule.fields || [],
-      });
-
-      const hasAtLeastOneRegistered = some(
-        (fields) => !isNil(fields),
-        flatMap(prop('fields'), ability.rulesFor(actionOverride, detectSubjectType(subject)))
+      const { permittedFields, hasAtLeastOneRegistered, shouldIncludeAll } = getPermissionFields(
+        actionOverride,
+        subject
       );
-      const shouldIncludeAllFields = isEmpty(permittedFields) && !hasAtLeastOneRegistered;
 
       const sanitizeOptions = {
         ...options,
         fields: {
-          shouldIncludeAll: shouldIncludeAllFields,
+          shouldIncludeAll,
           permitted: permittedFields,
           hasAtLeastOneRegistered,
         },
@@ -186,25 +219,26 @@ export default ({ action, ability, model }: any) => {
       const sanitizeFunction = createSanitizeFunction(sanitizeOptions);
 
       return sanitizeFunction(data);
-    };
+    }
 
     return wrappedSanitize;
   };
 
   const getDefaultOptions = (data: any, options: unknown) => {
-    return defaults({ subject: asSubject(model, data), action }, options);
+    return defaults({}, options, { subject: asSubject(model, data), action });
   };
 
   /**
    * Omit creator fields' (createdBy & updatedBy) roles from the admin API responses
    */
-  const omitCreatorRoles = omit([`${CREATED_BY_ATTRIBUTE}.roles`, `${UPDATED_BY_ATTRIBUTE}.roles`]);
+  const omitCreatorRoles = <T extends object>(data: T) =>
+    omit(data, [`${CREATED_BY_ATTRIBUTE}.roles`, `${UPDATED_BY_ATTRIBUTE}.roles`]);
 
   /**
    * Visitor used to remove hidden fields from the admin API responses
    */
   const omitHiddenFields = ({ key, schema }: any, { remove }: any) => {
-    const isHidden = getOr(false, ['config', 'attributes', key, 'hidden'], schema);
+    const isHidden = get(schema, ['config', 'attributes', key, 'hidden'], false);
 
     if (isHidden) {
       remove(key);
@@ -215,7 +249,10 @@ export default ({ action, ability, model }: any) => {
    * Visitor used to only select needed fields from the admin users entities & avoid leaking sensitive information
    */
   const pickAllowedAdminUserFields = ({ attribute, key, value }: any, { set }: any) => {
-    const pickAllowedFields = pick(ADMIN_USER_ALLOWED_FIELDS);
+    const pickAllowedFields = (user: object) => pick(user, ADMIN_USER_ALLOWED_FIELDS);
+    if (!attribute) {
+      return;
+    }
 
     if (attribute.type === 'relation' && attribute.target === 'admin::user' && value) {
       if (Array.isArray(value)) {
@@ -239,48 +276,56 @@ export default ({ action, ability, model }: any) => {
     const nonVisibleAttributes = getNonVisibleAttributes(schema);
     const writableAttributes = getWritableAttributes(schema);
 
-    const nonVisibleWritableAttributes = intersection(nonVisibleAttributes, writableAttributes);
+    const nonVisibleWritableAttributes = intersection(writableAttributes, nonVisibleAttributes);
 
-    return uniq([...fields, ...COMPONENT_FIELDS, ...nonVisibleWritableAttributes]);
+    return [...new Set([...fields, ...COMPONENT_FIELDS, ...nonVisibleWritableAttributes])];
   };
 
   const getOutputFields = (fields = []) => {
     const nonWritableAttributes = getNonWritableAttributes(schema);
     const nonVisibleAttributes = getNonVisibleAttributes(schema);
 
-    return uniq([
-      ...fields,
-      ...STATIC_FIELDS,
-      ...COMPONENT_FIELDS,
-      ...nonWritableAttributes,
-      ...nonVisibleAttributes,
-      CREATED_AT_ATTRIBUTE,
-      UPDATED_AT_ATTRIBUTE,
-    ]);
+    return [
+      ...new Set([
+        ...fields,
+        ...STATIC_FIELDS,
+        ...COMPONENT_FIELDS,
+        ...nonWritableAttributes,
+        ...nonVisibleAttributes,
+        CREATED_AT_ATTRIBUTE,
+        UPDATED_AT_ATTRIBUTE,
+      ]),
+    ];
   };
 
   const getQueryFields = (fields = []) => {
     const nonVisibleAttributes = getNonVisibleAttributes(schema);
     const writableAttributes = getWritableAttributes(schema);
 
-    const nonVisibleWritableAttributes = intersection(nonVisibleAttributes, writableAttributes);
+    const nonVisibleWritableAttributes = intersection(writableAttributes, nonVisibleAttributes);
 
-    return uniq([
-      ...fields,
-      ...STATIC_FIELDS,
-      ...COMPONENT_FIELDS,
-      ...nonVisibleWritableAttributes,
-      CREATED_AT_ATTRIBUTE,
-      UPDATED_AT_ATTRIBUTE,
-      PUBLISHED_AT_ATTRIBUTE,
-      CREATED_BY_ATTRIBUTE,
-      UPDATED_BY_ATTRIBUTE,
-    ]);
+    return [
+      ...new Set([
+        ...fields,
+        ...STATIC_FIELDS,
+        ...COMPONENT_FIELDS,
+        ...nonVisibleWritableAttributes,
+        CREATED_AT_ATTRIBUTE,
+        UPDATED_AT_ATTRIBUTE,
+        PUBLISHED_AT_ATTRIBUTE,
+        CREATED_BY_ATTRIBUTE,
+        UPDATED_BY_ATTRIBUTE,
+      ]),
+    ];
   };
+
+  // sanitizeQuery keeps its `unknown` result, so existing query callers keep their types
+  const sanitizeQuery: (query: unknown, options?: any) => Promise<unknown> =
+    wrapSanitize(createSanitizeQuery);
 
   return {
     sanitizeOutput: wrapSanitize(createSanitizeOutput),
     sanitizeInput: wrapSanitize(createSanitizeInput),
-    sanitizeQuery: wrapSanitize(createSanitizeQuery),
+    sanitizeQuery,
   };
 };

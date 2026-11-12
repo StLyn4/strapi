@@ -1,5 +1,7 @@
 import type { Knex } from 'knex';
 
+import path from 'node:path';
+
 import { Dialect, getDialect } from './dialects';
 import { createSchemaProvider, SchemaProvider } from './schema';
 import { createMetadata, Metadata } from './metadata';
@@ -9,25 +11,78 @@ import { createLifecyclesProvider, LifecycleProvider } from './lifecycles';
 import { createConnection } from './connection';
 import * as errors from './errors';
 import { Callback, transactionCtx, TransactionObject } from './transaction-context';
-
-// TODO: move back into strapi
-import { transformContentTypes } from './utils/content-types';
 import { validateDatabase } from './validations';
-import { Model } from './types';
+import { appendCallerStack } from './utils/async-stack';
+import type { Model } from './types';
+import { createRepairManager, type RepairManager } from './repairs';
+import { installPoolDiagnostics, type PoolDiagnostics } from './pool-diagnostics';
+import { withStrapiKnexLog } from './utils/knex-log';
 
 export { isKnexQuery } from './utils/knex';
+export { isDatabaseClientKind } from './connection';
+export { attributeNaming } from './metadata';
+export { createField } from './fields';
+export type { AttributeNaming, Meta } from './metadata';
+export type {
+  AttributeRenamesOperation,
+  Migration,
+  BuiltMigrationFile,
+  MigrationFileBuilder,
+  MigrationFileFormat,
+  MigrationFileOperation,
+} from './migrations';
+export type { Event } from './lifecycles';
+export type { Attribute, Model, JoinTable } from './types';
+export type { AttributeRenameHandler, AttributeRenames } from './schema';
+export type { Identifiers } from './utils/identifiers';
+export { POOL_TIMEOUT_CODE } from './pool-diagnostics';
+export type {
+  EventLoopDelay,
+  PoolDiagnostics,
+  PoolState,
+  PoolTimeoutDetails,
+} from './pool-diagnostics';
 
 interface Settings {
   forceMigration?: boolean;
   runMigrations?: boolean;
+  /**
+   * Describe the pool on knex connection pool timeouts (details on the error, a docs link, one
+   * warning block per 30 s). Defaults to true; false leaves knex's error untouched. Must be a
+   * boolean (for example `env.bool('DATABASE_POOL_TIMEOUT_DIAGNOSTICS', true)`): a string is not
+   * read as false.
+   */
+  poolTimeoutDiagnostics?: boolean;
+  migrations: {
+    dir: string;
+  };
   [key: string]: unknown;
 }
+
+export type Logger = Record<
+  'info' | 'warn' | 'error' | 'debug',
+  (message: string | Record<string, unknown>) => void
+>;
 
 export interface DatabaseConfig {
   connection: Knex.Config;
   settings: Settings;
-  models: Model[];
+  logger?: Logger;
+  /** Lifecycle phase of the host application, e.g. "boot" or "runtime", for pool timeout reports. */
+  getPhase?: () => string | undefined;
 }
+
+const afterCreate =
+  (db: Database) =>
+  (
+    nativeConnection: unknown,
+    done: (error: Error | null, nativeConnection: unknown) => Promise<void>
+  ) => {
+    // run initialize for it since commands such as postgres SET and sqlite PRAGMA are per-connection
+    db.dialect.initialize(nativeConnection).then(() => {
+      return done(null, nativeConnection);
+    });
+  };
 
 class Database {
   connection: Knex;
@@ -46,32 +101,70 @@ class Database {
 
   entityManager: EntityManager;
 
-  static transformContentTypes = transformContentTypes;
+  repair: RepairManager;
 
-  static async init(config: DatabaseConfig) {
-    const db = new Database(config);
-    await validateDatabase(db);
-    return db;
-  }
+  logger: Logger;
+
+  /** Set unless `settings.poolTimeoutDiagnostics` is false or the install failed. */
+  private poolDiagnostics?: PoolDiagnostics;
+
+  private phase?: string;
 
   constructor(config: DatabaseConfig) {
-    this.metadata = createMetadata(config.models);
-
     this.config = {
       ...config,
       settings: {
         forceMigration: true,
         runMigrations: true,
-        ...(config.settings ?? {}),
+        ...config.settings,
       },
     };
 
+    this.logger = config.logger ?? console;
+
     this.dialect = getDialect(this);
-    this.dialect.configure();
 
-    this.connection = createConnection(this.config.connection);
+    let knexConfig: Knex.Config = this.config.connection;
 
-    this.dialect.initialize();
+    // for object connections, we can configure the dialect synchronously
+    if (typeof this.config.connection.connection !== 'function') {
+      this.dialect.configure();
+    }
+    // for connection functions, we wrap it so that we can modify it with dialect configure before it reaches knex
+    else {
+      this.logger.warn(
+        'Knex connection functions are currently experimental. Attempting to access the connection object before database initialization will result in errors.'
+      );
+
+      knexConfig = {
+        ...this.config.connection,
+        connection: async () => {
+          // @ts-expect-error confirmed it was a function above
+          const conn = await this.config.connection.connection();
+          this.dialect.configure(conn);
+          return conn;
+        },
+      };
+    }
+
+    this.metadata = createMetadata([]);
+
+    this.connection = createConnection(withStrapiKnexLog(knexConfig, this.logger), {
+      pool: { afterCreate: afterCreate(this) },
+    });
+
+    if (this.config.settings.poolTimeoutDiagnostics !== false) {
+      try {
+        this.poolDiagnostics = installPoolDiagnostics(this.connection, {
+          logger: { warn: (message) => this.logger.warn(message) },
+          getPhase: () => this.phase ?? this.config.getPhase?.(),
+        });
+      } catch (error) {
+        // Diagnostics are optional: failing to install them must not stop the application booting
+        const reason = error instanceof Error ? error.message : String(error);
+        this.logger.debug(`[database] pool timeout diagnostics not installed: ${reason}`);
+      }
+    }
 
     this.schema = createSchemaProvider(this);
 
@@ -79,6 +172,37 @@ class Database {
     this.lifecycles = createLifecyclesProvider(this);
 
     this.entityManager = createEntityManager(this);
+
+    this.repair = createRepairManager(this);
+  }
+
+  async init({ models }: { models: Model[] }) {
+    if (typeof this.config.connection.connection === 'function') {
+      /*
+       * User code needs to be able to access `connection.connection` directly as if
+       * it were always an object. For a connection function, that doesn't happen
+       * until the pool is created, so we need to do that here
+       *
+       * TODO: In the next major version, we need to replace all internal code that
+       * directly references `connection.connection` prior to init, and make a breaking
+       * change that it cannot be relied on to exist before init so that we can call
+       * this feature stable.
+       */
+      this.logger.debug('Forcing Knex to make real connection to db');
+
+      // sqlite does not support connection pooling so acquireConnection doesn't work
+      if (this.config.connection.client === 'sqlite') {
+        await this.connection.raw('SELECT 1');
+      } else {
+        // release it straight away, otherwise it holds a pool slot for the life of the process
+        const conn = await this.connection.client.acquireConnection();
+        await this.connection.client.releaseConnection(conn);
+      }
+    }
+
+    this.metadata.loadModels(models);
+    await validateDatabase(this);
+    return this;
   }
 
   query(uid: string) {
@@ -93,6 +217,34 @@ class Database {
     return !!transactionCtx.get();
   }
 
+  /**
+   * Labels pool timeout reports raised while `fn` runs, for example "schema sync". Nested calls
+   * restore the outer label. Calls that overlap without nesting can restore the wrong label; core
+   * only nests them (schema sync, then a migration).
+   *
+   * The label is process-wide, not per call: a call made at runtime relabels every concurrent
+   * timeout report until it returns. It is meant for boot-time work (schema sync, migrations).
+   *
+   * @internal
+   */
+  async runInPhase<T>(phase: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.phase;
+    this.phase = phase;
+
+    try {
+      return await fn();
+    } finally {
+      this.phase = previous;
+    }
+  }
+
+  /**
+   * Run work inside a DB transaction. On a fulfilled callback, the transaction
+   * is committed; on rejection, it is rolled back. The callback receives Knex
+   * `commit` and `rollback` helpers: if you call `rollback` and return without
+   * throwing, the implementation avoids attempting a second `commit` on an
+   * already-finalised transactor.
+   */
   transaction(): Promise<TransactionObject>;
   transaction<TCallback extends Callback>(c: TCallback): Promise<ReturnType<TCallback>>;
   async transaction<TCallback extends Callback>(
@@ -100,7 +252,7 @@ class Database {
   ): Promise<ReturnType<TCallback> | TransactionObject> {
     const notNestedTransaction = !transactionCtx.get();
     const trx = notNestedTransaction
-      ? await this.connection.transaction()
+      ? await this.startTransaction()
       : (transactionCtx.get() as Knex.Transaction);
 
     async function commit() {
@@ -119,7 +271,7 @@ class Database {
       return { commit, rollback, get: () => trx };
     }
 
-    return transactionCtx.run(trx, async () => {
+    return await transactionCtx.run(trx, async () => {
       try {
         const callbackParams = {
           trx,
@@ -138,6 +290,31 @@ class Database {
     });
   }
 
+  /**
+   * Runs `cb` in a savepoint of the current transaction, so a failure undoes only `cb`'s writes.
+   * If `cb` throws, its writes are rolled back, the `onCommit` callbacks registered in it are
+   * dropped, its `onRollback` callbacks run, and the error is rethrown. The transaction stays
+   * usable, on Postgres also after a database error, but not after a MySQL deadlock, which rolls
+   * back the whole transaction: the savepoint then can't be rolled back to, and it throws an
+   * `errors.SavepointError`, as when it can't be released. Throws if called outside a transaction.
+   */
+  savepoint<T>(cb: () => Promise<T> | T): Promise<T> {
+    return transactionCtx.savepoint(cb);
+  }
+
+  /**
+   * Starts a top-level knex transaction. knex resolves it through a promise chain that async stack
+   * traces cannot follow, so on failure the stack is extended with the frames of our callers.
+   */
+  private async startTransaction(): Promise<Knex.Transaction> {
+    try {
+      return await this.connection.transaction();
+    } catch (error) {
+      appendCallerStack(error);
+      throw error;
+    }
+  }
+
   getSchemaName(): string | undefined {
     return this.connection.client.connectionSettings.schema;
   }
@@ -150,6 +327,34 @@ class Database {
     return schema ? connection.withSchema(schema) : connection;
   }
 
+  // Returns basic info about the database connection
+  getInfo() {
+    const connectionSettings = this.connection?.client?.connectionSettings || {};
+    const client = this.dialect?.client || '';
+
+    let displayName = '';
+    let schema;
+
+    // For SQLite, get the relative filename
+    if (client === 'sqlite') {
+      const absolutePath = connectionSettings?.filename;
+      if (absolutePath) {
+        displayName = path.relative(process.cwd(), absolutePath);
+      }
+    }
+    // For other dialects, get the database name
+    else {
+      displayName = connectionSettings?.database;
+      schema = connectionSettings?.schema;
+    }
+
+    return {
+      displayName,
+      schema,
+      client,
+    };
+  }
+
   getSchemaConnection(trx = this.connection) {
     const schema = this.getSchemaName();
     return schema ? trx.schema.withSchema(schema) : trx.schema;
@@ -160,7 +365,12 @@ class Database {
   }
 
   async destroy() {
-    await this.lifecycles.clear();
+    try {
+      await this.lifecycles.clear();
+    } finally {
+      this.poolDiagnostics?.dispose();
+    }
+
     await this.connection.destroy();
   }
 }

@@ -2,121 +2,155 @@ import * as React from 'react';
 
 import {
   Box,
-  FieldLabel,
   Flex,
   Grid,
-  GridItem,
   TextButton,
-  TextInput,
   ComboboxOption,
-  CreatableCombobox,
+  Combobox,
   ComboboxProps,
+  IconButton,
+  Field as DSField,
 } from '@strapi/design-system';
-import { RemoveRoundedButton } from '@strapi/helper-plugin';
-import { Plus } from '@strapi/icons';
-import { Field, FieldArray, FieldInputProps, useFormikContext } from 'formik';
+import { Minus, Plus } from '@strapi/icons';
 import { useIntl } from 'react-intl';
+import { styled } from 'styled-components';
+
+import { useField, useForm } from '../../../../../components/Form';
+import { StringInput } from '../../../../../components/FormInputs/String';
+
+const AddHeaderButton = styled(TextButton)`
+  cursor: pointer;
+`;
 
 /* -------------------------------------------------------------------------------------------------
  * HeadersInput
  * -----------------------------------------------------------------------------------------------*/
 
-interface FormikContext {
-  headers: Array<{ key: HTTPHeaders; value: string }>;
+interface Header {
+  key: HTTPHeaders;
+  value: string;
 }
 
 const HeadersInput = () => {
   const { formatMessage } = useIntl();
-  const { values, errors } = useFormikContext<FormikContext>();
+
+  const addFieldRow = useForm('HeadersInput', (state) => state.addFieldRow);
+  const removeFieldRow = useForm('HeadersInput', (state) => state.removeFieldRow);
+  const setFieldValue = useForm('HeadersInput', (state) => state.onChange);
+  const { value = [] } = useField<Header[]>('headers');
+  const rowKeyPrefix = React.useId();
+  const nextRowKey = React.useRef(0);
+  const rowKeys = React.useRef<string[]>([]);
+  const isLastRowClearPending = React.useRef(false);
+
+  while (rowKeys.current.length < value.length) {
+    rowKeys.current.push(`${rowKeyPrefix}-${nextRowKey.current}`);
+    nextRowKey.current += 1;
+  }
+  rowKeys.current.length = value.length;
+
+  // The form value reaches this component one render after `setFieldValue` is called. Once the
+  // last row is seen cleared, give it a fresh key so it remounts and the key Combobox drops its
+  // internal text state. Doing it earlier would remount the row while it still holds the old value.
+  if (
+    isLastRowClearPending.current === true &&
+    value.length === 1 &&
+    (value[0].key as string) === '' &&
+    value[0].value === ''
+  ) {
+    isLastRowClearPending.current = false;
+    rowKeys.current[0] = `${rowKeyPrefix}-${nextRowKey.current}`;
+    nextRowKey.current += 1;
+  }
+
+  const rows = value.map((_, index) => ({
+    index,
+    key: rowKeys.current[index],
+  }));
+
+  const removeRow = (index: number) => {
+    // Removing the only row clears it in place instead of deleting it, so the list length
+    // stays 1. Splicing rowKeys here would drop a key that the render body regenerates on the
+    // next pass. The key is renewed in the render body once the cleared value has arrived.
+    if (value.length === 1) {
+      isLastRowClearPending.current = true;
+      setFieldValue('headers', [{ key: '', value: '' }]);
+    } else {
+      rowKeys.current.splice(index, 1);
+      removeFieldRow('headers', index);
+    }
+  };
 
   return (
     <Flex direction="column" alignItems="stretch" gap={1}>
-      <FieldLabel>
+      <DSField.Label>
         {formatMessage({
           id: 'Settings.webhooks.form.headers',
           defaultMessage: 'Headers',
         })}
-      </FieldLabel>
+      </DSField.Label>
       <Box padding={8} background="neutral100" hasRadius>
-        <FieldArray
-          validateOnChange={false}
-          name="headers"
-          render={({ push, remove }) => (
-            <Grid gap={4}>
-              {values.headers.map((header, index) => {
-                const formikError = errors.headers?.[index];
-
-                const comboboxError = typeof formikError === 'object' ? formikError.key : undefined;
-                const textInputError =
-                  typeof formikError === 'object' ? formikError.value : undefined;
-
-                return (
-                  <React.Fragment key={`${index}.${header.key}`}>
-                    <GridItem col={6}>
-                      <Field
-                        as={HeaderCombobox}
-                        name={`headers.${index}.key`}
-                        aria-label={`row ${index + 1} key`}
-                        label={formatMessage({
-                          id: 'Settings.webhooks.key',
-                          defaultMessage: 'Key',
-                        })}
-                        error={comboboxError}
-                      />
-                    </GridItem>
-                    <GridItem col={6}>
-                      <Flex alignItems="flex-end">
-                        <Box style={{ flex: 1 }}>
-                          <Field
-                            as={TextInput}
-                            name={`headers.${index}.value`}
-                            aria-label={`row ${index + 1} value`}
-                            label={formatMessage({
-                              id: 'Settings.webhooks.value',
-                              defaultMessage: 'Value',
-                            })}
-                            error={textInputError}
-                          />
-                        </Box>
-                        <Flex
-                          paddingLeft={2}
-                          style={{ alignSelf: 'center' }}
-                          paddingTop={textInputError ? 0 : 5}
-                        >
-                          <RemoveRoundedButton
-                            disabled={values.headers.length === 1}
-                            onClick={() => remove(index)}
-                            label={formatMessage(
-                              {
-                                id: 'Settings.webhooks.headers.remove',
-                                defaultMessage: 'Remove header row {number}',
-                              },
-                              { number: index + 1 }
-                            )}
-                          />
-                        </Flex>
-                      </Flex>
-                    </GridItem>
-                  </React.Fragment>
-                );
-              })}
-              <GridItem col={12}>
-                <TextButton
-                  type="button"
-                  onClick={() => {
-                    push({ key: '', value: '' });
-                  }}
-                  startIcon={<Plus />}
-                >
-                  {formatMessage({
-                    id: 'Settings.webhooks.create.header',
-                    defaultMessage: 'Create new header',
+        {rows.map(({ index, key }) => {
+          return (
+            <Grid.Root key={key} gap={4} padding={2}>
+              <Grid.Item xs={12} col={6} direction="column" alignItems="stretch">
+                <HeaderCombobox
+                  name={`headers.${index}.key`}
+                  aria-label={`row ${index + 1} key`}
+                  label={formatMessage({
+                    id: 'Settings.webhooks.key',
+                    defaultMessage: 'Key',
                   })}
-                </TextButton>
-              </GridItem>
-            </Grid>
-          )}
-        />
+                />
+              </Grid.Item>
+              <Grid.Item xs={12} col={6} direction="column" alignItems="stretch">
+                <Flex alignItems="flex-end" gap={2}>
+                  <Box style={{ flex: 1 }}>
+                    <StringInput
+                      name={`headers.${index}.value`}
+                      aria-label={`row ${index + 1} value`}
+                      label={formatMessage({
+                        id: 'Settings.webhooks.value',
+                        defaultMessage: 'Value',
+                      })}
+                      type="text"
+                    />
+                  </Box>
+                  <IconButton
+                    width="4rem"
+                    height="4rem"
+                    onClick={() => removeRow(index)}
+                    color="primary600"
+                    label={formatMessage(
+                      {
+                        id: 'Settings.webhooks.headers.remove',
+                        defaultMessage: 'Remove header row {number}',
+                      },
+                      { number: index + 1 }
+                    )}
+                    type="button"
+                  >
+                    <Minus width="0.8rem" />
+                  </IconButton>
+                </Flex>
+              </Grid.Item>
+            </Grid.Root>
+          );
+        })}
+        <Box paddingTop={4}>
+          <AddHeaderButton
+            type="button"
+            onClick={() => {
+              addFieldRow('headers', { key: '', value: '' });
+            }}
+            startIcon={<Plus />}
+          >
+            {formatMessage({
+              id: 'Settings.webhooks.create.header',
+              defaultMessage: 'Create new header',
+            })}
+          </AddHeaderButton>
+        </Box>
       </Box>
     </Flex>
   );
@@ -126,49 +160,56 @@ const HeadersInput = () => {
  * HeaderCombobox
  * -----------------------------------------------------------------------------------------------*/
 
-interface HeaderComboboxProps
-  extends FieldInputProps<string>,
-    Required<Pick<ComboboxProps, 'label' | 'error'>> {}
+interface HeaderComboboxProps extends Omit<ComboboxProps, 'children' | 'name'> {
+  name: string;
+  label: string;
+}
 
-const HeaderCombobox = ({ name, onChange, value, ...restProps }: HeaderComboboxProps) => {
-  const {
-    values: { headers },
-  } = useFormikContext<FormikContext>();
+const HeaderCombobox = ({ name, label, ...restProps }: HeaderComboboxProps) => {
   const [options, setOptions] = React.useState<HTTPHeaders[]>([...HTTP_HEADERS]);
+  const { value: headers } = useField<Header[]>('headers');
+  const field = useField<string>(name);
 
   React.useEffect(() => {
     const headerOptions = HTTP_HEADERS.filter(
-      (key) => !headers?.some((header) => header.key !== value && header.key === key)
+      (key) => !headers?.some((header) => header.key !== field.value && header.key === key)
     );
 
     setOptions(headerOptions);
-  }, [headers, value]);
+  }, [headers, field.value]);
 
   const handleChange: ComboboxProps['onChange'] = (value) => {
-    onChange({ target: { name, value } });
+    field.onChange(name, value);
   };
 
-  const handleCreateOption = (value: string) => {
+  const handleCreateOption = (value?: string) => {
     setOptions((prev) => [...prev, value as HTTPHeaders]);
 
-    handleChange(value);
+    if (value) {
+      handleChange(value);
+    }
   };
 
   return (
-    <CreatableCombobox
-      {...restProps}
-      onClear={() => handleChange('')}
-      onChange={handleChange}
-      onCreateOption={handleCreateOption}
-      placeholder=""
-      value={value}
-    >
-      {options.map((key) => (
-        <ComboboxOption value={key} key={key}>
-          {key}
-        </ComboboxOption>
-      ))}
-    </CreatableCombobox>
+    <DSField.Root name={name} error={field.error}>
+      <DSField.Label>{label}</DSField.Label>
+      <Combobox
+        {...restProps}
+        onClear={() => handleChange('')}
+        onChange={handleChange}
+        onCreateOption={handleCreateOption}
+        placeholder=""
+        creatable
+        value={field.value}
+      >
+        {options.map((key) => (
+          <ComboboxOption value={key} key={key}>
+            {key}
+          </ComboboxOption>
+        ))}
+      </Combobox>
+      <DSField.Error />
+    </DSField.Root>
   );
 };
 

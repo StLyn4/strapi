@@ -2,9 +2,8 @@ import _ from 'lodash';
 import { yup } from '@strapi/utils';
 
 import type { TestContext } from 'yup';
-import type { Attribute, Common, Schema } from '@strapi/types';
+import type { Schema, Struct } from '@strapi/types';
 
-import { hasComponent } from '../../utils/attributes';
 import { modelTypes, VALID_UID_TARGETS } from '../../services/constants';
 import {
   validators,
@@ -12,13 +11,13 @@ import {
   isValidDefaultJSON,
   isValidName,
   isValidEnum,
-  isValidUID,
   isValidRegExpPattern,
+  UID_REGEX,
 } from './common';
 
 export type GetTypeValidatorOptions = {
   types: ReadonlyArray<string>;
-  attributes?: Schema.Attributes;
+  attributes?: Struct.SchemaAttributes;
   modelType?: (typeof modelTypes)[keyof typeof modelTypes];
 };
 
@@ -32,7 +31,7 @@ const maxLengthIsGreaterThanOrEqualToMinLength = {
 };
 
 export const getTypeValidator = (
-  attribute: Attribute.Any,
+  attribute: Schema.Attribute.AnyAttribute,
   { types, modelType, attributes }: GetTypeValidatorOptions
 ) => {
   return yup.object({
@@ -47,7 +46,7 @@ export const getTypeValidator = (
   } as any);
 };
 
-const getTypeShape = (attribute: Attribute.Any, { modelType, attributes }: any = {}) => {
+const getTypeShape = (attribute: Schema.Attribute.AnyAttribute, { attributes }: any = {}) => {
   switch (attribute.type) {
     /**
      * complex types
@@ -80,12 +79,24 @@ const getTypeShape = (attribute: Attribute.Any, { modelType, attributes }: any =
           .test(
             'isValidDefaultUID',
             'cannot define a default UID if the targetField is set',
-            function (value) {
+            function isValidDefaultUID(value) {
               const { targetField } = this.parent;
               return !!(_.isNil(targetField) || _.isNil(value));
             }
           )
-          .test(isValidUID),
+          .test(
+            'isValidDefaultRegexUID',
+            `\${path} must match the custom regex or the default one "${UID_REGEX}"`,
+            function isValidDefaultRegexUID(value) {
+              const { regex } = this.parent;
+
+              if (regex) {
+                return !_.isNil(value) && (value === '' || new RegExp(regex).test(value));
+              }
+
+              return value === '' || UID_REGEX.test(value as string);
+            }
+          ),
         minLength: validators.minLength,
         maxLength: validators.maxLength.max(256).test(maxLengthIsGreaterThanOrEqualToMinLength),
         options: yup.object().shape({
@@ -95,13 +106,23 @@ const getTypeShape = (attribute: Attribute.Any, { modelType, attributes }: any =
           customReplacements: yup.array().of(yup.array().of(yup.string()).min(2).max(2)),
           preserveLeadingUnderscore: yup.boolean(),
         }),
+        regex: yup.string().test(isValidRegExpPattern),
       };
     }
 
     /**
      * scalar types
      */
-    case 'string':
+    case 'string': {
+      return {
+        default: yup.string(),
+        required: validators.required,
+        unique: validators.unique,
+        minLength: validators.minLength,
+        maxLength: validators.maxLength.max(255).test(maxLengthIsGreaterThanOrEqualToMinLength),
+        regex: yup.string().test(isValidRegExpPattern),
+      };
+    }
     case 'text': {
       return {
         default: yup.string(),
@@ -207,7 +228,7 @@ const getTypeShape = (attribute: Attribute.Any, { modelType, attributes }: any =
     }
     case 'boolean': {
       return {
-        default: yup.boolean(),
+        default: yup.boolean().nullable(),
         required: validators.required,
       };
     }
@@ -216,24 +237,8 @@ const getTypeShape = (attribute: Attribute.Any, { modelType, attributes }: any =
       return {
         required: validators.required,
         repeatable: yup.boolean(),
-        component: yup
-          .string()
-          .test({
-            name: 'Check max component nesting is 1 lvl',
-            test(compoUID: unknown) {
-              const targetCompo = strapi.components[compoUID as Common.UID.Component];
-              if (!targetCompo) return true; // ignore this error as it will fail beforehand
-
-              if (modelType === modelTypes.COMPONENT && hasComponent(targetCompo)) {
-                return this.createError({
-                  path: this.path,
-                  message: `${targetCompo.modelName} already is a nested component. You cannot have more than one level of nesting inside your components.`,
-                });
-              }
-              return true;
-            },
-          })
-          .required(),
+        // TODO: Add correct server validation for nested components
+        component: yup.string().required(),
         min: yup.number(),
         max: yup.number(),
       };
@@ -245,7 +250,12 @@ const getTypeShape = (attribute: Attribute.Any, { modelType, attributes }: any =
         components: yup
           .array()
           .of(yup.string().required())
-          .test('isArray', '${path} must be an array', (value) => Array.isArray(value))
+          .test(
+            'isArray',
+            // eslint-disable-next-line no-template-curly-in-string -- Yup interpolation placeholder
+            '${path} must be an array',
+            (value) => Array.isArray(value)
+          )
           .min(1),
         min: yup.number(),
         max: yup.number(),

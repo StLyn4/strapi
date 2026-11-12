@@ -11,5 +11,7 @@ export interface EventHub {
   destroy(): EventHub;
   removeListener(eventName: string, listener: Listener): void;
   removeAllListeners(): EventHub;
+  removeAllSubscribers(): EventHub;
   addListener(eventName: string, listener: Listener): () => void;
+  hasListeners(eventName: string): boolean;
 }

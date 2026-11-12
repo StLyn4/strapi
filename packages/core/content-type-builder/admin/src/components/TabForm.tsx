@@ -1,15 +1,55 @@
-import { Box, Grid, GridItem, Typography } from '@strapi/design-system';
-import { GenericInput } from '@strapi/helper-plugin';
+import { Box, Grid, Typography, Button, Tooltip } from '@strapi/design-system';
 import get from 'lodash/get';
 import { useIntl } from 'react-intl';
 
-interface TabFormProps {
-  form: Array<Record<string, any>>;
-  formErrors: Record<string, any>;
-  genericInputProps: Record<string, any>;
-  modifiedData: Record<string, any>;
-  onChange: (value: any) => void;
-}
+import { getAvailableConditionFields } from '../utils/conditions';
+
+import { GenericInput } from './GenericInputs';
+
+import type { AnyAttribute, AttributeConditions, IntlLabel } from '../types';
+
+type FormInput = Partial<React.ComponentProps<typeof GenericInput>> & {
+  name: string;
+  type: string;
+  size?: number;
+};
+
+type FormSection = {
+  sectionTitle?: IntlLabel | null;
+  intlLabel?: IntlLabel;
+  items: FormInput[];
+};
+
+type FormError = {
+  id?: string;
+};
+
+type GenericInputProps = Record<string, unknown> & {
+  attributeName?: string;
+  contentTypeSchema?: {
+    attributes?: AnyAttribute[];
+  };
+};
+
+type ModifiedData = Record<string, unknown> & {
+  name?: string;
+};
+
+type TabFormChangeHandler = (value: {
+  target: {
+    name: string;
+    value?: unknown;
+    type?: string;
+  };
+}) => void;
+
+type TabFormProps = {
+  form: FormSection[];
+  formErrors: Record<string, FormError>;
+  genericInputProps: GenericInputProps;
+  modifiedData: ModifiedData;
+  onChange: TabFormChangeHandler;
+};
 
 /* eslint-disable react/no-array-index-key */
 export const TabForm = ({
@@ -20,6 +60,8 @@ export const TabForm = ({
   onChange,
 }: TabFormProps) => {
   const { formatMessage } = useIntl();
+  const sharedInputProps = genericInputProps as Partial<React.ComponentProps<typeof GenericInput>> &
+    GenericInputProps;
 
   return (
     <>
@@ -28,19 +70,29 @@ export const TabForm = ({
         if (section.items.length === 0) {
           return null;
         }
-
         return (
           <Box key={sectionIndex}>
             {section.sectionTitle && (
               <Box paddingBottom={4}>
-                <Typography variant="delta" as="h3">
+                <Typography variant="delta" tag="h3">
                   {formatMessage(section.sectionTitle)}
                 </Typography>
               </Box>
             )}
-            <Grid gap={4}>
-              {section.items.map((input: any, i: number) => {
+            {section.intlLabel && (
+              <Typography variant="pi" textColor="neutral600">
+                {formatMessage(section.intlLabel)}
+              </Typography>
+            )}
+
+            <Grid.Root gap={4}>
+              {section.items.map((input, i) => {
                 const key = `${sectionIndex}.${i}`;
+                const intlLabel = input.intlLabel ?? {
+                  id: input.name,
+                  defaultMessage: input.name,
+                };
+
                 /**
                  * Use undefined as the default value because not every input wants a string e.g. Date pickers
                  */
@@ -57,7 +109,7 @@ export const TabForm = ({
 
                 // Retrieve the error for a specific input
                 const errorId = pluginOptionError
-                  ? formErrors[pluginOptionError].id
+                  ? formErrors[pluginOptionError]?.id
                   : get(
                       formErrors,
                       [
@@ -76,25 +128,125 @@ export const TabForm = ({
 
                 if (input.type === 'pushRight') {
                   return (
-                    <GridItem col={input.size || 6} key={input.name || key}>
+                    <Grid.Item
+                      col={input.size ?? 6}
+                      xs={12}
+                      key={input.name ?? key}
+                      direction="column"
+                      alignItems="stretch"
+                    >
                       <div />
-                    </GridItem>
+                    </Grid.Item>
                   );
                 }
 
+                // Special handling for 'condition-form'
+                if (input.type === 'condition-form') {
+                  const currentCondition = get(modifiedData, input.name) as
+                    AttributeConditions | null | undefined;
+
+                  // Get all attributes from the content type schema
+                  const contentTypeAttributes =
+                    sharedInputProps.contentTypeSchema?.attributes ?? [];
+
+                  if (!sharedInputProps.contentTypeSchema) {
+                    console.warn('contentTypeSchema is undefined, skipping condition form');
+                    return null;
+                  }
+
+                  // Filter for boolean and enumeration fields only, excluding the current field
+                  const availableFields = getAvailableConditionFields(
+                    contentTypeAttributes,
+                    modifiedData.name ?? ''
+                  );
+
+                  const noFieldsMessage = formatMessage({
+                    id: 'form.attribute.condition.no-fields',
+                    defaultMessage:
+                      'No boolean or enumeration fields available to set conditions on.',
+                  });
+
+                  return (
+                    <Grid.Item
+                      col={input.size ?? 12}
+                      xs={12}
+                      key={input.name ?? key}
+                      direction="column"
+                      alignItems="stretch"
+                    >
+                      {currentCondition === null ||
+                      currentCondition === undefined ||
+                      Object.keys(currentCondition).length === 0 ? (
+                        <Box>
+                          <Tooltip label={noFieldsMessage}>
+                            <Button
+                              marginTop={4}
+                              fullWidth={true}
+                              variant="secondary"
+                              onClick={() => {
+                                onChange({
+                                  target: {
+                                    name: input.name,
+                                    value: { visible: { '==': [{ var: '' }, ''] } },
+                                  },
+                                });
+                              }}
+                              startIcon={<span aria-hidden>＋</span>}
+                              disabled={availableFields.length === 0}
+                            >
+                              {formatMessage({
+                                id: 'form.attribute.condition.apply',
+                                defaultMessage: 'Apply condition',
+                              })}
+                            </Button>
+                          </Tooltip>
+                        </Box>
+                      ) : (
+                        <GenericInput
+                          {...input}
+                          {...sharedInputProps}
+                          error={errorId}
+                          intlLabel={intlLabel}
+                          onChange={onChange}
+                          value={value}
+                          autoFocus={i === 0}
+                          attributeName={modifiedData.name}
+                          conditionFields={availableFields}
+                          onDelete={() => {
+                            onChange({
+                              target: {
+                                name: input.name,
+                              },
+                            });
+                          }}
+                        />
+                      )}
+                    </Grid.Item>
+                  );
+                }
+
+                // Default rendering for all other input types
                 return (
-                  <GridItem col={input.size || 6} key={input.name || key}>
+                  <Grid.Item
+                    col={input.size ?? 6}
+                    xs={12}
+                    key={input.name ?? key}
+                    direction="column"
+                    alignItems="stretch"
+                  >
                     <GenericInput
                       {...input}
-                      {...genericInputProps}
+                      {...sharedInputProps}
                       error={errorId}
+                      intlLabel={intlLabel}
                       onChange={onChange}
                       value={value}
+                      autoFocus={i === 0}
                     />
-                  </GridItem>
+                  </Grid.Item>
                 );
               })}
-            </Grid>
+            </Grid.Root>
           </Box>
         );
       })}

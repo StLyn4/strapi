@@ -55,7 +55,7 @@ describe('File', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBe(1);
 
@@ -94,7 +94,7 @@ describe('File', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBe(1);
 
@@ -165,8 +165,8 @@ describe('File', () => {
           mime: 'application/pdf',
           hash: expect.any(String),
           size: expect.any(Number),
-          width: expect.any(Number),
-          height: expect.any(Number),
+          width: null,
+          height: null,
           url: expect.any(String),
           provider: 'local',
           folder: { id: data.folders[1].id },
@@ -199,8 +199,8 @@ describe('File', () => {
           mime: 'application/pdf',
           hash: expect.any(String),
           size: expect.any(Number),
-          width: expect.any(Number),
-          height: expect.any(Number),
+          width: null,
+          height: null,
           url: expect.any(String),
           provider: 'local',
           folder: { id: data.folders[0].id },
@@ -236,8 +236,8 @@ describe('File', () => {
           mime: 'application/pdf',
           hash: expect.any(String),
           size: expect.any(Number),
-          width: expect.any(Number),
-          height: expect.any(Number),
+          width: null,
+          height: null,
           url: expect.any(String),
           provider: 'local',
           folder: { id: data.folders[0].id },
@@ -270,8 +270,8 @@ describe('File', () => {
           mime: 'application/pdf',
           hash: expect.any(String),
           size: expect.any(Number),
-          width: expect.any(Number),
-          height: expect.any(Number),
+          width: null,
+          height: null,
           url: expect.any(String),
           provider: 'local',
           folder: { id: data.folders[1].id },
@@ -341,8 +341,8 @@ describe('File', () => {
           mime: 'application/pdf',
           hash: expect.any(String),
           size: expect.any(Number),
-          width: expect.any(Number),
-          height: expect.any(Number),
+          width: null,
+          height: null,
           url: expect.any(String),
           provider: 'local',
           folder: null,

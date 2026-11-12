@@ -4,21 +4,19 @@
  *
  */
 
-import React from 'react';
+import * as React from 'react';
 
 import {
   Button,
   Flex,
   Grid,
-  GridItem,
-  ModalBody,
-  ModalFooter,
-  ModalHeader,
-  ModalLayout,
+  Modal,
+  Breadcrumbs,
+  Crumb,
+  VisuallyHidden,
 } from '@strapi/design-system';
-import { Breadcrumbs, Crumb } from '@strapi/design-system/v2';
-import { Form } from '@strapi/helper-plugin';
-import { Formik } from 'formik';
+import { FormikUnsavedChangesRegistrar, UnsavedChangesModal } from '@strapi/strapi/admin';
+import { Form, Formik } from 'formik';
 import PropTypes from 'prop-types';
 import { useIntl } from 'react-intl';
 
@@ -36,71 +34,77 @@ const FormModal = ({
 }) => {
   const { formatMessage } = useIntl();
 
-  if (!isOpen) {
-    return null;
-  }
-
   return (
-    <ModalLayout onClose={onToggle} labelledBy="title">
-      <ModalHeader>
-        <Breadcrumbs label={headerBreadcrumbs.join(', ')}>
-          {headerBreadcrumbs.map((crumb, index, arr) => (
-            <Crumb isCurrent={index === arr.length - 1} key={crumb}>
-              {crumb}
-            </Crumb>
-          ))}
-        </Breadcrumbs>
-      </ModalHeader>
-      <Formik
-        onSubmit={(values) => onSubmit(values)}
-        initialValues={initialData}
-        validationSchema={layout.schema}
-        validateOnChange={false}
-      >
-        {({ errors, handleChange, values }) => {
-          return (
-            <Form>
-              <ModalBody>
-                <Flex direction="column" alignItems="stretch" gap={1}>
-                  <Grid gap={5}>
-                    {layout.form.map((row) => {
-                      return row.map((input) => {
-                        return (
-                          <GridItem key={input.name} col={input.size} xs={12}>
-                            <Input
-                              {...input}
-                              error={errors[input.name]}
-                              onChange={handleChange}
-                              value={values[input.name]}
-                              providerToEditName={providerToEditName}
-                            />
-                          </GridItem>
-                        );
-                      });
-                    })}
-                  </Grid>
-                </Flex>
-              </ModalBody>
-              <ModalFooter
-                startActions={
-                  <Button variant="tertiary" onClick={onToggle} type="button">
-                    {formatMessage({
-                      id: 'app.components.Button.cancel',
-                      defaultMessage: 'Cancel',
-                    })}
-                  </Button>
-                }
-                endActions={
+    <UnsavedChangesModal open={isOpen} onOpenChange={onToggle}>
+      <Modal.Content>
+        <Modal.Header>
+          <Breadcrumbs label={headerBreadcrumbs.join(', ')}>
+            {headerBreadcrumbs.map((crumb, index, arr) => (
+              <Crumb isCurrent={index === arr.length - 1} key={crumb}>
+                {crumb}
+              </Crumb>
+            ))}
+          </Breadcrumbs>
+          <VisuallyHidden>
+            <Modal.Title>{headerBreadcrumbs.join(', ')}</Modal.Title>
+          </VisuallyHidden>
+        </Modal.Header>
+        <Formik
+          onSubmit={(values) => onSubmit(values)}
+          initialValues={initialData}
+          validationSchema={layout.schema}
+          validateOnChange={false}
+        >
+          {({ errors, handleChange, values }) => {
+            return (
+              <Form>
+                <FormikUnsavedChangesRegistrar />
+                <Modal.Body>
+                  <Flex direction="column" alignItems="stretch" gap={1}>
+                    <Grid.Root gap={5}>
+                      {layout.form.map((row) => {
+                        return row.map((input) => {
+                          return (
+                            <Grid.Item
+                              key={input.name}
+                              col={input.size}
+                              xs={12}
+                              direction="column"
+                              alignItems="stretch"
+                            >
+                              <Input
+                                {...input}
+                                error={errors[input.name]}
+                                onChange={handleChange}
+                                value={values[input.name]}
+                                providerToEditName={providerToEditName}
+                              />
+                            </Grid.Item>
+                          );
+                        });
+                      })}
+                    </Grid.Root>
+                  </Flex>
+                </Modal.Body>
+                <Modal.Footer>
+                  <Modal.Close>
+                    <Button variant="tertiary" type="button">
+                      {formatMessage({
+                        id: 'app.components.Button.cancel',
+                        defaultMessage: 'Cancel',
+                      })}
+                    </Button>
+                  </Modal.Close>
                   <Button type="submit" loading={isSubmiting}>
                     {formatMessage({ id: 'global.save', defaultMessage: 'Save' })}
                   </Button>
-                }
-              />
-            </Form>
-          );
-        }}
-      </Formik>
-    </ModalLayout>
+                </Modal.Footer>
+              </Form>
+            );
+          }}
+        </Formik>
+      </Modal.Content>
+    </UnsavedChangesModal>
   );
 };
 

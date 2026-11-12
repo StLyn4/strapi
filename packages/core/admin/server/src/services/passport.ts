@@ -1,6 +1,5 @@
 import passport from 'koa-passport';
 import type { Strategy } from 'passport-local';
-import { isFunction } from 'lodash/fp';
 
 import createLocalStrategy from './passport/local-strategy';
 
@@ -9,9 +8,9 @@ const authEventsMapper = {
   onConnectionError: 'admin.auth.error',
 };
 
-const valueIsFunctionType = ([, value]: [any, any]) => isFunction(value);
+const valueIsFunctionType = ([, value]: [any, any]) => typeof value === 'function';
 const keyIsValidEventName = ([key]: any) => {
-  return Object.keys(strapi.admin.services.passport.authEventsMapper).includes(key);
+  return Object.keys(strapi.service('admin::passport').authEventsMapper).includes(key);
 };
 
 const getPassportStrategies = () => [createLocalStrategy(strapi)] as Strategy[];
@@ -19,7 +18,7 @@ const getPassportStrategies = () => [createLocalStrategy(strapi)] as Strategy[];
 const registerAuthEvents = () => {
   // @ts-expect-error - TODO: migrate auth service to TS
   const { events = {} } = strapi.config.get('admin.auth', {});
-  const { authEventsMapper } = strapi.admin.services.passport;
+  const { authEventsMapper } = strapi.service('admin::passport');
 
   const eventList = Object.entries(events).filter(keyIsValidEventName).filter(valueIsFunctionType);
 
@@ -30,7 +29,8 @@ const registerAuthEvents = () => {
 };
 
 const init = () => {
-  strapi.admin.services.passport
+  strapi
+    .service('admin::passport')
     .getPassportStrategies()
     .forEach((strategy: Strategy) => passport.use(strategy));
 

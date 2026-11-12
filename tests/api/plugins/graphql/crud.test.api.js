@@ -1,6 +1,6 @@
 'use strict';
 
-const { omit, prop } = require('lodash/fp');
+const { omit } = require('lodash');
 
 // Helpers.
 const { createTestBuilder } = require('api-tests/builder');
@@ -22,6 +22,10 @@ const postModel = {
     },
     nullable: {
       type: 'string',
+    },
+    privateNote: {
+      type: 'string',
+      private: true,
     },
     category: {
       type: 'enumeration',
@@ -66,13 +70,17 @@ describe('Test Graphql API End to End', () => {
     };
 
     test.each(postsPayload)('Create Post %o', async (post) => {
+      const input = post.name === 'post 1' ? { ...post, privateNote: 'stored but hidden' } : post;
+
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           mutation createPost($data: PostInput!) {
             createPost(data: $data) {
               data {
+                documentId
                 attributes {
                   name
+                  publishedAt
                   bigint
                   nullable
                   category
@@ -82,7 +90,7 @@ describe('Test Graphql API End to End', () => {
           }
         `,
         variables: {
-          data: post,
+          data: input,
         },
       });
 
@@ -93,20 +101,32 @@ describe('Test Graphql API End to End', () => {
         data: {
           createPost: {
             data: {
-              attributes: post,
+              documentId: expect.any(String),
+              attributes: {
+                ...post,
+                publishedAt: expect.any(String),
+              },
             },
           },
         },
       });
+
+      if (input.privateNote) {
+        const createdPost = await strapi.db.query('api::post.post').findOne({
+          where: { documentId: body.data.createPost.data.documentId },
+        });
+
+        expect(createdPost.privateNote).toBe(input.privateNote);
+      }
     });
 
     test('List posts', async () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            posts {
+            posts_connection {
               data {
-                id
+                documentId
                 attributes {
                   name
                   bigint
@@ -124,17 +144,72 @@ describe('Test Graphql API End to End', () => {
       expect(res.statusCode).toBe(200);
       expect(body).toMatchObject({
         data: {
-          posts: {
+          posts_connection: {
             data: postsPayload.map((entry) => ({
-              id: expect.any(String),
-              attributes: omit('id', entry),
+              documentId: expect.any(String),
+              attributes: omit(entry, 'documentId'),
             })),
           },
         },
       });
 
       // assign for later use
-      data.posts = res.body.data.posts.data.map(({ id, attributes }) => ({ id, ...attributes }));
+      data.posts = res.body.data.posts_connection.data.map(({ documentId, attributes }) => ({
+        documentId,
+        ...attributes,
+      }));
+    });
+
+    test("Can't list a private field", async () => {
+      const res = await graphqlQuery({
+        query: /* GraphQL */ `
+          {
+            posts_connection {
+              data {
+                attributes {
+                  name
+                  privateNote
+                }
+              }
+            }
+          }
+        `,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toMatchObject({
+        errors: [
+          {
+            message: 'Cannot query field "privateNote" on type "Post".',
+          },
+        ],
+      });
+    });
+
+    test("Can't filter by a private field", async () => {
+      const res = await graphqlQuery({
+        query: /* GraphQL */ `
+          query findPosts($filters: PostFiltersInput) {
+            posts_connection(filters: $filters) {
+              data {
+                attributes {
+                  name
+                }
+              }
+            }
+          }
+        `,
+        variables: {
+          filters: {
+            privateNote: { eq: 'stored but hidden' },
+          },
+        },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.errors[0].message).toContain(
+        'Field "privateNote" is not defined by type "PostFiltersInput"'
+      );
     });
 
     test('List posts with GET', async () => {
@@ -149,7 +224,7 @@ describe('Test Graphql API End to End', () => {
       const res = await graphqlQueryGET({
         query: /* GraphQL */ `
           {
-            posts {
+            posts: posts_connection {
               data {
                 id
                 attributes {
@@ -172,7 +247,7 @@ describe('Test Graphql API End to End', () => {
           posts: {
             data: postsPayload.map((entry) => ({
               id: expect.any(String),
-              attributes: omit('id', entry),
+              attributes: omit(entry, 'id'),
             })),
           },
         },
@@ -183,9 +258,9 @@ describe('Test Graphql API End to End', () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            posts(pagination: { limit: 1 }) {
+            posts_connection(pagination: { limit: 1 }) {
               data {
-                id
+                documentId
                 attributes {
                   name
                   bigint
@@ -203,11 +278,11 @@ describe('Test Graphql API End to End', () => {
       expect(res.statusCode).toBe(200);
       expect(res.body).toEqual({
         data: {
-          posts: {
+          posts_connection: {
             data: [
               {
-                id: expectedPost.id,
-                attributes: omit('id', expectedPost),
+                documentId: expectedPost.documentId,
+                attributes: omit(expectedPost, 'documentId'),
               },
             ],
           },
@@ -219,9 +294,9 @@ describe('Test Graphql API End to End', () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            posts(sort: "name:desc") {
+            posts_connection(sort: "name:desc") {
               data {
-                id
+                documentId
                 attributes {
                   name
                   bigint
@@ -235,14 +310,14 @@ describe('Test Graphql API End to End', () => {
       });
 
       const expectedPosts = [...data.posts].reverse().map((entry) => ({
-        id: expect.any(String),
-        attributes: omit('id', entry),
+        documentId: expect.any(String),
+        attributes: omit(entry, 'documentId'),
       }));
 
       expect(res.statusCode).toBe(200);
       expect(res.body).toEqual({
         data: {
-          posts: {
+          posts_connection: {
             data: expectedPosts,
           },
         },
@@ -253,9 +328,9 @@ describe('Test Graphql API End to End', () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            posts(pagination: { start: 1 }) {
+            posts_connection(pagination: { start: 1 }) {
               data {
-                id
+                documentId
                 attributes {
                   name
                   bigint
@@ -273,11 +348,11 @@ describe('Test Graphql API End to End', () => {
       expect(res.statusCode).toBe(200);
       expect(res.body).toEqual({
         data: {
-          posts: {
+          posts_connection: {
             data: [
               {
-                id: expectedPost.id,
-                attributes: omit('id', expectedPost),
+                documentId: expectedPost.documentId,
+                attributes: omit(expectedPost, 'documentId'),
               },
             ],
           },
@@ -289,9 +364,9 @@ describe('Test Graphql API End to End', () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            posts(filters: { name: { eq: "post 2" } }) {
+            posts_connection(filters: { name: { eq: "post 2" } }) {
               data {
-                id
+                documentId
                 attributes {
                   name
                   bigint
@@ -317,11 +392,11 @@ describe('Test Graphql API End to End', () => {
       expect(res.statusCode).toBe(200);
       expect(res.body).toEqual({
         data: {
-          posts: {
+          posts_connection: {
             data: [
               {
-                id: expectedPost.id,
-                attributes: omit('id', expectedPost),
+                documentId: expectedPost.documentId,
+                attributes: omit(expectedPost, 'documentId'),
               },
             ],
             meta: {
@@ -337,18 +412,22 @@ describe('Test Graphql API End to End', () => {
       });
     });
 
-    test.skip('List posts with `createdBy` and `updatedBy`', async () => {
+    // This has not been enabled because it does not seem to work and the v5 docs says the feature is missing, but it should be added
+    test.todo(`updatedBy and createdBy are available with populateCreatorFields`);
+
+    test('`updatedBy` is not available', async () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            posts(start: 1) {
+            posts_connection(start: 1) {
               data {
-                id
+                documentId
                 attributes {
                   name
                   bigint
                   nullable
                   category
+                  updatedBy
                 }
               }
             }
@@ -356,13 +435,30 @@ describe('Test Graphql API End to End', () => {
         `,
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(400);
+    });
 
-      // no errors should be present in the response
-      expect(res.body.error).toBeUndefined();
+    test('`createdBy` is not available', async () => {
+      const res = await graphqlQuery({
+        query: /* GraphQL */ `
+          {
+            posts_connection(start: 1) {
+              data {
+                documentId
+                attributes {
+                  name
+                  bigint
+                  nullable
+                  category
+                  createdBy
+                }
+              }
+            }
+          }
+        `,
+      });
 
-      // since the posts are created without AdminUser, it should return null
-      expect(res.body.data.posts[0].createdBy).toBeNull();
+      expect(res.statusCode).toBe(400);
     });
 
     test.each([
@@ -463,7 +559,7 @@ describe('Test Graphql API End to End', () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           query findPosts($filters: PostFiltersInput) {
-            posts(filters: $filters) {
+            posts_connection(filters: $filters) {
               data {
                 attributes {
                   name
@@ -482,20 +578,24 @@ describe('Test Graphql API End to End', () => {
 
       expect(res.statusCode).toBe(200);
 
-      const { data: posts } = res.body.data.posts;
+      const { data: posts } = res.body.data.posts_connection;
 
       // same length
       expect(posts.length).toBe(expected.length);
 
       // all the posts returned are in the expected array
-      posts.map(prop('attributes')).forEach((post) => {
-        expect(expected.map(omit('id'))).toEqual(expect.arrayContaining([post]));
-      });
+      posts
+        .map((post) => post?.attributes)
+        .forEach((post) => {
+          expect(expected.map((value) => omit(value, 'documentId'))).toEqual(
+            expect.arrayContaining([post])
+          );
+        });
 
       // all expected values are in the result
       expected.forEach((expectedPost) => {
-        expect(posts.map(prop('attributes'))).toEqual(
-          expect.arrayContaining([omit('id', expectedPost)])
+        expect(posts.map((post) => post?.attributes)).toEqual(
+          expect.arrayContaining([omit(expectedPost, 'documentId')])
         );
       });
     });
@@ -503,10 +603,10 @@ describe('Test Graphql API End to End', () => {
     test('Get One Post', async () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
-          query getPost($id: ID!) {
-            post(id: $id) {
+          query getPost($documentId: ID!) {
+            post(documentId: $documentId) {
               data {
-                id
+                documentId
                 attributes {
                   name
                   bigint
@@ -518,7 +618,7 @@ describe('Test Graphql API End to End', () => {
           }
         `,
         variables: {
-          id: data.posts[0].id,
+          documentId: data.posts[0].documentId,
         },
       });
 
@@ -527,8 +627,8 @@ describe('Test Graphql API End to End', () => {
         data: {
           post: {
             data: {
-              id: data.posts[0].id,
-              attributes: omit('id', data.posts[0]),
+              documentId: data.posts[0].documentId,
+              attributes: omit(data.posts[0], 'documentId'),
             },
           },
         },
@@ -537,12 +637,13 @@ describe('Test Graphql API End to End', () => {
 
     test('Update Post', async () => {
       const newName = 'new post name';
+      const newPrivateNote = 'updated private note';
       const res = await graphqlQuery({
         query: /* GraphQL */ `
-          mutation updatePost($id: ID!, $data: PostInput!) {
-            updatePost(id: $id, data: $data) {
+          mutation updatePost($documentId: ID!, $data: PostInput!) {
+            updatePost(documentId: $documentId, data: $data) {
               data {
-                id
+                documentId
                 attributes {
                   name
                 }
@@ -551,9 +652,10 @@ describe('Test Graphql API End to End', () => {
           }
         `,
         variables: {
-          id: data.posts[0].id,
+          documentId: data.posts[0].documentId,
           data: {
             name: newName,
+            privateNote: newPrivateNote,
           },
         },
       });
@@ -563,7 +665,7 @@ describe('Test Graphql API End to End', () => {
         data: {
           updatePost: {
             data: {
-              id: data.posts[0].id,
+              documentId: data.posts[0].documentId,
               attributes: {
                 name: newName,
               },
@@ -572,10 +674,16 @@ describe('Test Graphql API End to End', () => {
         },
       });
 
+      const updatedPost = await strapi.db.query('api::post.post').findOne({
+        where: { documentId: data.posts[0].documentId },
+      });
+
+      expect(updatedPost.privateNote).toBe(newPrivateNote);
+
       const newPost = res.body.data.updatePost.data;
 
       data.posts[0] = {
-        id: newPost.id,
+        documentId: newPost.documentId,
         ...newPost.attributes,
       };
     });
@@ -584,22 +692,14 @@ describe('Test Graphql API End to End', () => {
       for (const post of data.posts) {
         const res = await graphqlQuery({
           query: /* GraphQL */ `
-            mutation deletePost($id: ID!) {
-              deletePost(id: $id) {
-                data {
-                  id
-                  attributes {
-                    name
-                    nullable
-                    bigint
-                    category
-                  }
-                }
+            mutation deletePost($documentId: ID!) {
+              deletePost(documentId: $documentId) {
+                documentId
               }
             }
           `,
           variables: {
-            id: post.id,
+            documentId: post.documentId,
           },
         });
 
@@ -607,10 +707,7 @@ describe('Test Graphql API End to End', () => {
         expect(res.body).toMatchObject({
           data: {
             deletePost: {
-              data: {
-                id: post.id,
-                attributes: omit('id', post),
-              },
+              documentId: post.documentId,
             },
           },
         });

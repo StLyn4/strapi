@@ -15,8 +15,14 @@ const recipesModel = {
   attributes: {
     name: {
       type: 'string',
+      pluginOptions: {
+        i18n: {
+          localized: true,
+        },
+      },
     },
   },
+  draftAndPublish: true,
   pluginOptions: {
     i18n: {
       localized: true,
@@ -44,16 +50,16 @@ describe('Test Graphql API create localization', () => {
       });
     };
 
-    const locale = await strapi.query('plugin::i18n.locale').create({
+    const locale = await strapi.db.query('plugin::i18n.locale').create({
       data: { code: 'fr', name: 'French' },
     });
 
-    localeId = locale.id;
+    localeId = locale.documentId;
   });
 
   afterAll(async () => {
-    await strapi.query('plugin::i18n.locale').delete({ where: { id: localeId } });
-    await strapi.query('api::recipe.recipe').deleteMany();
+    await strapi.db.query('plugin::i18n.locale').delete({ where: { documentId: localeId } });
+    await strapi.db.query('api::recipe.recipe').deleteMany();
     await strapi.destroy();
     await builder.cleanup();
   });
@@ -64,7 +70,7 @@ describe('Test Graphql API create localization', () => {
         mutation createRecipe($data: RecipeInput!) {
           createRecipe(data: $data) {
             data {
-              id
+              documentId
               attributes {
                 name
                 locale
@@ -94,14 +100,14 @@ describe('Test Graphql API create localization', () => {
       },
     });
 
-    const recipeId = createResponse.body.data.createRecipe.data.id;
+    const recipeId = createResponse.body.data.createRecipe.data.documentId;
 
-    const createLocalizationResponse = await graphqlQuery({
+    const updateRecipeResponse = await graphqlQuery({
       query: /* GraphQL */ `
-        mutation createRecipeLocalization($id: ID!, $locale: I18NLocaleCode, $data: RecipeInput!) {
-          createRecipeLocalization(id: $id, locale: $locale, data: $data) {
+        mutation updateRecipe($documentId: ID!, $locale: I18NLocaleCode, $data: RecipeInput!) {
+          updateRecipe(documentId: $documentId, locale: $locale, data: $data) {
             data {
-              id
+              documentId
               attributes {
                 name
                 locale
@@ -111,7 +117,7 @@ describe('Test Graphql API create localization', () => {
         }
       `,
       variables: {
-        id: recipeId,
+        documentId: recipeId,
         locale: 'fr',
         data: {
           name: 'Recipe Name fr',
@@ -119,8 +125,8 @@ describe('Test Graphql API create localization', () => {
       },
     });
 
-    expect(createLocalizationResponse.statusCode).toBe(200);
-    expect(createLocalizationResponse.body.data.createRecipeLocalization).toMatchObject({
+    expect(updateRecipeResponse.statusCode).toBe(200);
+    expect(updateRecipeResponse.body.data.updateRecipe).toMatchObject({
       data: {
         attributes: {
           name: 'Recipe Name fr',
@@ -128,5 +134,124 @@ describe('Test Graphql API create localization', () => {
         },
       },
     });
+  });
+
+  test('Localizations match the publication state of the parent entry', async () => {
+    const englishRecipe = await strapi.documents('api::recipe.recipe').create({
+      locale: 'en',
+      status: 'published',
+      data: {
+        name: 'English published localization state',
+      },
+    });
+
+    await strapi.documents('api::recipe.recipe').update({
+      documentId: englishRecipe.documentId,
+      locale: 'fr',
+      status: 'published',
+      data: {
+        name: 'French published localization state',
+      },
+    });
+
+    await strapi.documents('api::recipe.recipe').update({
+      documentId: englishRecipe.documentId,
+      locale: 'en',
+      data: {
+        name: 'English draft localization state',
+      },
+    });
+
+    await strapi.documents('api::recipe.recipe').update({
+      documentId: englishRecipe.documentId,
+      locale: 'fr',
+      data: {
+        name: 'French draft localization state',
+      },
+    });
+
+    const response = await graphqlQuery({
+      query: /* GraphQL */ `
+        {
+          live: recipes_connection(
+            locale: "en"
+            filters: { name: { eq: "English published localization state" } }
+          ) {
+            data {
+              attributes {
+                name
+                publishedAt
+                localizations {
+                  data {
+                    attributes {
+                      name
+                      locale
+                      publishedAt
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          draft: recipes_connection(
+            locale: "en"
+            status: DRAFT
+            filters: { name: { eq: "English draft localization state" } }
+          ) {
+            data {
+              attributes {
+                name
+                publishedAt
+                localizations {
+                  data {
+                    attributes {
+                      name
+                      locale
+                      publishedAt
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `,
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const live = response.body.data.live.data[0].attributes;
+    const draft = response.body.data.draft.data[0].attributes;
+    const liveLocalizations = live.localizations.map(
+      (localization) => localization.data.attributes
+    );
+    const draftLocalizations = draft.localizations.map(
+      (localization) => localization.data.attributes
+    );
+
+    expect(live).toMatchObject({
+      name: 'English published localization state',
+      publishedAt: expect.any(String),
+    });
+    expect(liveLocalizations).toEqual([
+      {
+        name: 'French published localization state',
+        locale: 'fr',
+        publishedAt: expect.any(String),
+      },
+    ]);
+
+    expect(draft).toMatchObject({
+      name: 'English draft localization state',
+      publishedAt: null,
+    });
+    expect(draftLocalizations).toEqual([
+      {
+        name: 'French draft localization state',
+        locale: 'fr',
+        publishedAt: null,
+      },
+    ]);
   });
 });

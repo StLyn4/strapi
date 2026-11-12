@@ -1,5 +1,5 @@
 /* eslint-disable consistent-return */
-import produce from 'immer';
+import { produce } from 'immer';
 import pull from 'lodash/pull';
 
 import { ContentApiPermission } from '../../../../../../../shared/contracts/content-api/permissions';
@@ -42,7 +42,7 @@ interface ActionUpdateRoutes {
 
 interface ActionUpdatePermissions {
   type: 'UPDATE_PERMISSIONS';
-  value: any[];
+  value: string[];
 }
 
 interface ActionSetSelectedAction {

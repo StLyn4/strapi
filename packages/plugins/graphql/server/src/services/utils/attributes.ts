@@ -1,5 +1,5 @@
-import { propEq } from 'lodash/fp';
-import type { Attribute } from '@strapi/types';
+import { matchesProperty } from 'lodash';
+import type { Schema } from '@strapi/types';
 import type { Context } from '../types';
 
 export default ({ strapi }: Context) => {
@@ -8,7 +8,7 @@ export default ({ strapi }: Context) => {
    * @param {object} attribute
    * @return {boolean}
    */
-  const isStrapiScalar = (attribute: Attribute.Any) => {
+  const isStrapiScalar = (attribute: Schema.Attribute.AnyAttribute) => {
     return strapi.plugin('graphql').service('constants').STRAPI_SCALARS.includes(attribute.type);
   };
 
@@ -17,7 +17,7 @@ export default ({ strapi }: Context) => {
    * @param {object} attribute
    * @return {boolean}
    */
-  const isGraphQLScalar = (attribute: Attribute.Any) => {
+  const isGraphQLScalar = (attribute: Schema.Attribute.AnyAttribute) => {
     return strapi.plugin('graphql').service('constants').GRAPHQL_SCALARS.includes(attribute.type);
   };
 
@@ -26,7 +26,7 @@ export default ({ strapi }: Context) => {
    * @param {object} attribute
    * @return {boolean}
    */
-  const isMorphRelation = (attribute: Attribute.Any) => {
+  const isMorphRelation = (attribute: Schema.Attribute.AnyAttribute) => {
     return attribute.type === 'relation' && attribute.relation.includes('morph');
   };
 
@@ -35,35 +35,35 @@ export default ({ strapi }: Context) => {
    * @param {object} attribute
    * @return {boolean}
    */
-  const isMedia = propEq('type', 'media');
+  const isMedia = matchesProperty('type', 'media');
 
   /**
    * Check if the given attribute is a relation
    * @param {object} attribute
    * @return {boolean}
    */
-  const isRelation = propEq('type', 'relation');
+  const isRelation = matchesProperty('type', 'relation');
 
   /**
    * Check if the given attribute is an enum
    * @param {object} attribute
    * @return {boolean}
    */
-  const isEnumeration = propEq('type', 'enumeration');
+  const isEnumeration = matchesProperty('type', 'enumeration');
 
   /**
    * Check if the given attribute is a component
    * @param {object} attribute
    * @return {boolean}
    */
-  const isComponent = propEq('type', 'component');
+  const isComponent = matchesProperty('type', 'component');
 
   /**
    * Check if the given attribute is a dynamic zone
    * @param {object} attribute
    * @return {boolean}
    */
-  const isDynamicZone = propEq('type', 'dynamiczone');
+  const isDynamicZone = matchesProperty('type', 'dynamiczone');
 
   return {
     isStrapiScalar,

@@ -1,120 +1,159 @@
-import {
-  ActionLayout,
-  Box,
-  ContentLayout,
-  HeaderLayout,
-  Layout,
-  Main,
-} from '@strapi/design-system';
-import {
-  AnErrorOccurred,
-  DynamicTable,
-  SettingsPageTitle,
-  useFocusWhenNavigate,
-  useQueryParams,
-  useRBAC,
-  CheckPagePermissions,
-} from '@strapi/helper-plugin';
+import * as React from 'react';
+
+import { Button, Flex, IconButton, Typography } from '@strapi/design-system';
+import { Download, Eye } from '@strapi/icons';
 import { useIntl } from 'react-intl';
 
+import { Filters, toApiFilters } from '../../../../../../../admin/src/components/Filters';
+import { Layouts } from '../../../../../../../admin/src/components/Layouts/Layout';
+import { Page } from '../../../../../../../admin/src/components/PageHelpers';
+import { Pagination } from '../../../../../../../admin/src/components/Pagination';
+import { Table } from '../../../../../../../admin/src/components/Table';
 import { useTypedSelector } from '../../../../../../../admin/src/core/store/hooks';
-import { Filters } from '../../../../../../../admin/src/pages/Settings/components/Filters';
-import { SanitizedAdminUserForAuditLogs } from '../../../../../../../shared/contracts/audit-logs';
+import {
+  useQueryParams,
+  withEncodedUserParams,
+} from '../../../../../../../admin/src/hooks/useQueryParams';
+import { useRBAC } from '../../../../../../../admin/src/hooks/useRBAC';
+import { NotFoundPage } from '../../../../../../../admin/src/pages/NotFoundPage';
+import { AuditLog } from '../../../../../../../shared/contracts/audit-logs';
+import { useIsAuditLogsDisabledByConfig } from '../../../../hooks/useIsAuditLogsDisabledByConfig';
 
+import { ExportCard } from './components/ExportCard';
 import { Modal } from './components/Modal';
-import { PaginationFooter } from './components/PaginationFooter';
-import { TableHeader, TableRows } from './components/TableRows';
-import { useAuditLogsData } from './hooks/useAuditLogsData';
+import { useAuditLogs, useAuditLogUsers } from './hooks/useAuditLogsData';
+import { useExportAuditLogs } from './hooks/useExportAuditLogs';
+import { useFormatTimeStamp } from './hooks/useFormatTimeStamp';
+import { getDefaultMessage } from './utils/getActionTypesDefaultMessages';
 import { getDisplayedFilters } from './utils/getDisplayedFilters';
+
+const USERS_PAGE_SIZE = 10;
 
 const ListPage = () => {
   const { formatMessage } = useIntl();
   const permissions = useTypedSelector((state) => state.admin_app.permissions.settings);
 
+  const readPermissions = permissions?.auditLogs?.read;
+  const exportPermissions = permissions?.auditLogs?.export;
   const {
-    allowedActions: { canRead: canReadAuditLogs, canReadUsers },
+    allowedActions: { canRead: canReadAuditLogs, canExport: canExportAuditLogs },
     isLoading: isLoadingRBAC,
-  } = useRBAC({
-    ...permissions?.auditLogs,
-    readUsers: permissions?.users.read || [],
+  } = useRBAC(
+    React.useMemo(
+      () => [...(readPermissions ?? []), ...(exportPermissions ?? [])],
+      [readPermissions, exportPermissions]
+    )
+  );
+
+  const [{ query }, setQuery] = useQueryParams<{
+    id?: AuditLog['id'];
+    filters?: Filters.Query['filters'];
+    _q?: unknown;
+  }>();
+
+  const openLog = (id: AuditLog['id']) =>
+    setQuery(withEncodedUserParams(query, { id }), 'push', true);
+  const closeLog = () => setQuery(withEncodedUserParams(query, { id: undefined }), 'push', true);
+  const { exportAuditLogs, downloadExport, dismissExport, isExporting, progress, exportResult } =
+    useExportAuditLogs();
+
+  const [usersPageSize, setUsersPageSize] = React.useState(USERS_PAGE_SIZE);
+  const {
+    users,
+    usersPagination,
+    isLoadingUsers,
+    isLoading: isLoadingAuditLogUsers,
+    hasError: hasUsersError,
+  } = useAuditLogUsers({
+    canReadAuditLogs,
+    pageSize: usersPageSize,
   });
 
-  const [{ query }, setQuery] = useQueryParams<{ id?: string | null }>();
+  const { page = 1, pageCount = 1 } = usersPagination ?? {};
+  const hasMoreUsers = page < pageCount;
+
+  const handleLoadMoreUsers = () => {
+    if (hasMoreUsers) {
+      setUsersPageSize((prevPageSize) => prevPageSize + USERS_PAGE_SIZE);
+    }
+  };
+
+  const formatTimeStamp = useFormatTimeStamp();
+
+  const displayedFilters = getDisplayedFilters({
+    formatMessage,
+    users,
+    usersFilter: {
+      loading: isLoadingUsers,
+      hasMoreItems: hasMoreUsers,
+      onLoadMore: handleLoadMoreUsers,
+    },
+  });
+  // A date filter stores a day or a minute: the API reads it as the instants it covers
+  const apiFilters = toApiFilters(query?.filters, displayedFilters);
   const {
     auditLogs,
-    users,
-    isLoading: isLoadingData,
-    hasError,
-  } = useAuditLogsData({
+    isLoading: isLoadingAuditLogs,
+    hasError: hasAuditLogsError,
+  } = useAuditLogs({
     canReadAuditLogs,
-    canReadUsers,
+    query: { ...query, filters: apiFilters },
   });
+  const isLoadingData = isLoadingAuditLogUsers || isLoadingAuditLogs;
+  const hasError = hasUsersError || hasAuditLogsError;
 
-  useFocusWhenNavigate();
-
-  const displayedFilters = getDisplayedFilters({ formatMessage, users, canReadUsers });
-
-  const headers = [
+  const headers: Table.Header<AuditLog, object>[] = [
     {
       name: 'action',
-      key: 'action',
-      metadatas: {
-        label: formatMessage({
-          id: 'Settings.permissions.auditLogs.action',
-          defaultMessage: 'Action',
-        }),
-        sortable: true,
-      },
+      label: formatMessage({
+        id: 'Settings.permissions.auditLogs.action',
+        defaultMessage: 'Action',
+      }),
+      sortable: true,
     },
     {
       name: 'date',
-      key: 'date',
-      metadatas: {
-        label: formatMessage({
-          id: 'Settings.permissions.auditLogs.date',
-          defaultMessage: 'Date',
-        }),
-        sortable: true,
-      },
+      label: formatMessage({
+        id: 'Settings.permissions.auditLogs.date',
+        defaultMessage: 'Date',
+      }),
+      sortable: true,
     },
     {
-      key: 'user',
       name: 'user',
-      metadatas: {
-        label: formatMessage({
-          id: 'Settings.permissions.auditLogs.user',
-          defaultMessage: 'User',
-        }),
-        sortable: false,
-      },
-      // In this case, the passed parameter cannot and shouldn't be something else than User
-      cellFormatter: (user) => (user ? (user as SanitizedAdminUserForAuditLogs).displayName : ''),
+      label: formatMessage({
+        id: 'Settings.permissions.auditLogs.user',
+        defaultMessage: 'User',
+      }),
+      sortable: false,
+      // System actions, such as a scheduled release publish, have no user
+      cellFormatter: ({ user }) => (user ? user.displayName : '-'),
     },
-  ] satisfies TableHeader[];
+  ];
 
   if (hasError) {
-    return (
-      <Layout>
-        <ContentLayout>
-          <Box paddingTop={8}>
-            <AnErrorOccurred />
-          </Box>
-        </ContentLayout>
-      </Layout>
-    );
+    return <Page.Error />;
   }
 
   const isLoading = isLoadingData || isLoadingRBAC;
 
+  const { results = [] } = auditLogs ?? {};
+  const totalEntries = auditLogs?.pagination?.total;
+
   return (
-    <Main aria-busy={isLoading}>
-      <SettingsPageTitle
-        name={formatMessage({
-          id: 'global.auditLogs',
-          defaultMessage: 'Audit Logs',
-        })}
-      />
-      <HeaderLayout
+    <Page.Main aria-busy={isLoading}>
+      <Page.Title>
+        {formatMessage(
+          { id: 'Settings.PageTitle', defaultMessage: 'Settings - {name}' },
+          {
+            name: formatMessage({
+              id: 'global.auditLogs',
+              defaultMessage: 'Audit Logs',
+            }),
+          }
+        )}
+      </Page.Title>
+      <Layouts.Header
         title={formatMessage({
           id: 'global.auditLogs',
           defaultMessage: 'Audit Logs',
@@ -123,26 +162,123 @@ const ListPage = () => {
           id: 'Settings.permissions.auditLogs.listview.header.subtitle',
           defaultMessage: 'Logs of all the activities that happened in your environment',
         })}
+        primaryAction={
+          canExportAuditLogs && (
+            <Button
+              startIcon={<Download />}
+              loading={isExporting}
+              disabled={isLoading || totalEntries === 0}
+              onClick={() => exportAuditLogs(apiFilters, totalEntries ?? 0)}
+            >
+              {formatMessage({
+                id: 'Settings.permissions.auditLogs.listview.export',
+                defaultMessage: 'Export as CSV',
+              })}
+            </Button>
+          )
+        }
       />
-      <ActionLayout startActions={<Filters displayedFilters={displayedFilters} />} />
-      <ContentLayout>
-        <DynamicTable
-          contentType="Audit logs"
-          headers={headers}
-          rows={auditLogs?.results || []}
-          withBulkActions
-          isLoading={isLoading}
-        >
-          <TableRows
-            headers={headers}
-            rows={auditLogs?.results || []}
-            onOpenModal={(id) => setQuery({ id: `${id}` })}
-          />
-        </DynamicTable>
-        {auditLogs?.pagination && <PaginationFooter pagination={auditLogs.pagination} />}
-      </ContentLayout>
-      {query?.id && <Modal handleClose={() => setQuery({ id: null }, 'remove')} logId={query.id} />}
-    </Main>
+      <Layouts.Action
+        startActions={
+          <Filters.Root options={displayedFilters}>
+            <Filters.Trigger />
+            <Filters.Popover zIndex={499} />
+            <Filters.List />
+          </Filters.Root>
+        }
+      />
+      <Layouts.Content>
+        <Table.Root rows={results} headers={headers} isLoading={isLoading}>
+          <Table.Content>
+            <Table.Head>
+              {headers.map((header) => (
+                <Table.HeaderCell key={header.name} {...header} />
+              ))}
+            </Table.Head>
+            <Table.Empty />
+            <Table.Loading />
+            <Table.Body>
+              {results.map((log) => (
+                <Table.Row key={log.id} onClick={() => openLog(log.id)}>
+                  {headers.map((header) => {
+                    const { name, cellFormatter } = header;
+
+                    switch (name) {
+                      case 'action':
+                        return (
+                          <Table.Cell key={name}>
+                            <Typography textColor="neutral800">
+                              {formatMessage(
+                                {
+                                  id: `Settings.permissions.auditLogs.${log.action}`,
+                                  // @ts-expect-error – getDefaultMessage probably doesn't benefit from being so strongly typed unless we just add string at the end.
+                                  defaultMessage: getDefaultMessage(log.action),
+                                },
+                                { model: (log.payload?.model as string) ?? '' }
+                              )}
+                            </Typography>
+                          </Table.Cell>
+                        );
+                      case 'date':
+                        return (
+                          <Table.Cell key={name}>
+                            <Typography textColor="neutral800">
+                              {formatTimeStamp(log.date)}
+                            </Typography>
+                          </Table.Cell>
+                        );
+                      case 'user':
+                        return (
+                          <Table.Cell key={name}>
+                            <Typography textColor="neutral800">
+                              {cellFormatter ? cellFormatter(log, header) : '-'}
+                            </Typography>
+                          </Table.Cell>
+                        );
+                      default:
+                        return (
+                          <Table.Cell key={name}>
+                            <Typography textColor="neutral800">
+                              {(log[name as keyof AuditLog] as string) || '-'}
+                            </Typography>
+                          </Table.Cell>
+                        );
+                    }
+                  })}
+                  <Table.Cell onClick={(e) => e.stopPropagation()}>
+                    <Flex justifyContent="end">
+                      <IconButton
+                        onClick={() => openLog(log.id)}
+                        withTooltip={false}
+                        label={formatMessage(
+                          { id: 'app.component.table.view', defaultMessage: '{target} details' },
+                          { target: `${log.action} action` }
+                        )}
+                        variant="ghost"
+                      >
+                        <Eye />
+                      </IconButton>
+                    </Flex>
+                  </Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table.Content>
+        </Table.Root>
+
+        <Pagination.Root {...auditLogs?.pagination}>
+          <Pagination.PageSize />
+          <Pagination.Links />
+        </Pagination.Root>
+      </Layouts.Content>
+      {query?.id && <Modal handleClose={closeLog} logId={query.id.toString()} />}
+      <ExportCard
+        progress={progress}
+        exportResult={exportResult}
+        onDownload={downloadExport}
+        onDismiss={dismissExport}
+      />
+    </Page.Main>
   );
 };
 
@@ -150,11 +286,20 @@ const ProtectedListPage = () => {
   const permissions = useTypedSelector(
     (state) => state.admin_app.permissions.settings?.auditLogs?.main
   );
+  const { isLoading, isDisabledByConfig } = useIsAuditLogsDisabledByConfig();
+
+  if (isLoading === true) {
+    return <Page.Loading />;
+  }
+
+  if (isDisabledByConfig === true) {
+    return <NotFoundPage />;
+  }
 
   return (
-    <CheckPagePermissions permissions={permissions}>
+    <Page.Protect permissions={permissions}>
       <ListPage />
-    </CheckPagePermissions>
+    </Page.Protect>
   );
 };
 

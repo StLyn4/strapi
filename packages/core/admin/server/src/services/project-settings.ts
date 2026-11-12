@@ -1,6 +1,8 @@
 import fs from 'fs';
 import { pick } from 'lodash';
+import { emitAudit } from '@strapi/utils';
 import { GetProjectSettings, UpdateProjectSettings } from '../../../shared/contracts/admin';
+import { AUDITED_EVENTS, getProjectSettingsChanges } from '../audit-logs/project-settings';
 
 const PROJECT_SETTINGS_FILE_INPUTS = ['menuLogo', 'authLogo'] as const;
 
@@ -35,15 +37,15 @@ const parseFilesData = async (files: UpdateProjectSettings.Request['files']) => 
         return;
       }
 
-      const getStream = () => fs.createReadStream(file.path);
+      const getStream = () => fs.createReadStream(file.filepath);
 
       // Add formated data for the upload provider
       formatedFilesData[inputName] = await strapi
         .plugin('upload')
         .service('upload')
         .formatFileInfo({
-          filename: file.name,
-          type: file.type,
+          filename: file.originalFilename,
+          type: file.mimetype,
           size: file.size,
         });
 
@@ -56,10 +58,10 @@ const parseFilesData = async (files: UpdateProjectSettings.Request['files']) => 
       // Add file path, and stream
       Object.assign(formatedFilesData[inputName]!, {
         stream: getStream(),
-        tmpPath: file.path,
+        tmpPath: file.filepath,
         // TODO
         // @ts-expect-error define the correct return type
-        provider: strapi.config.get('plugin.upload').provider,
+        provider: strapi.config.get('plugin::upload').provider,
       });
     })
   );
@@ -134,7 +136,7 @@ const deleteOldFiles = async ({ previousSettings, newSettings }: any) => {
       // Skip if the file was not uploaded with the current provider
       // TODO
       // @ts-expect-error define the correct return type
-      if (strapi.config.get('plugin.upload').provider !== previousSettings[inputName].provider) {
+      if (strapi.config.get('plugin::upload').provider !== previousSettings[inputName].provider) {
         return;
       }
 
@@ -189,6 +191,12 @@ const updateProjectSettings = async (
     key: 'project-settings',
     value: { ...previousSettings, ...newSettings },
   });
+
+  const changes = getProjectSettingsChanges(previousSettings, newSettings);
+
+  if (Object.keys(changes).length > 0) {
+    await emitAudit({ strapi }, AUDITED_EVENTS.PROJECT_SETTINGS_UPDATE, { changes });
+  }
 
   return getProjectSettings();
 };

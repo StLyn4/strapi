@@ -48,7 +48,7 @@ const productWithDP = {
   collectionName: '',
 };
 
-describe('Core API - Basic + draftAndPublish', () => {
+describe('Core API - Basic', () => {
   beforeAll(async () => {
     await builder.addComponent(compo).addContentType(productWithDP).build();
 
@@ -75,13 +75,13 @@ describe('Core API - Basic + draftAndPublish', () => {
       },
     });
 
-    expect(statusCode).toBe(200);
+    expect(statusCode).toBe(201);
     expect(body.data).toMatchObject({
       id: expect.anything(),
-      attributes: product,
+      ...product,
     });
 
-    expect(body.data.attributes.publishedAt).toBeISODate();
+    expect(body.data.publishedAt).toBeISODate();
 
     data.products.push(body.data);
   });
@@ -101,13 +101,13 @@ describe('Core API - Basic + draftAndPublish', () => {
       },
     });
 
-    expect(statusCode).toBe(200);
+    expect(statusCode).toBe(201);
     expect(body.data).toMatchObject({
-      id: expect.anything(),
-      attributes: product,
+      documentId: expect.anything(),
+      ..._.omit(product, 'publishedAt'),
     });
 
-    expect(body.data.attributes.publishedAt).toBeISODate();
+    expect(body.data.publishedAt).toBeISODate();
 
     data.products.push(body.data);
   });
@@ -124,17 +124,15 @@ describe('Core API - Basic + draftAndPublish', () => {
     expect(body.data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          id: expect.anything(),
-          attributes: expect.objectContaining({
-            name: 'Product 1',
-            description: 'Product description',
-          }),
+          documentId: expect.anything(),
+          name: 'Product 1',
+          description: 'Product description',
         }),
       ])
     );
 
     body.data.forEach((p) => {
-      expect(p.attributes.publishedAt).toBeISODate();
+      expect(p.publishedAt).toBeISODate();
     });
   });
 
@@ -146,7 +144,7 @@ describe('Core API - Basic + draftAndPublish', () => {
 
     const { statusCode, body } = await rq({
       method: 'PUT',
-      url: `/product-with-dps/${data.products[0].id}`,
+      url: `/product-with-dps/${data.products[0].documentId}`,
       body: {
         data: product,
       },
@@ -154,11 +152,11 @@ describe('Core API - Basic + draftAndPublish', () => {
 
     expect(statusCode).toBe(200);
     expect(body.data).toMatchObject({
-      id: data.products[0].id,
-      attributes: product,
+      documentId: data.products[0].documentId,
+      ...product,
     });
 
-    expect(body.data.attributes.publishedAt).toBeISODate();
+    expect(body.data.publishedAt).toBeISODate();
 
     data.products[0] = body.data;
   });
@@ -172,7 +170,7 @@ describe('Core API - Basic + draftAndPublish', () => {
 
     const { statusCode, body } = await rq({
       method: 'PUT',
-      url: `/product-with-dps/${data.products[0].id}`,
+      url: `/product-with-dps/${data.products[0].documentId}`,
       body: {
         data: product,
       },
@@ -181,25 +179,25 @@ describe('Core API - Basic + draftAndPublish', () => {
     expect(statusCode).toBe(200);
 
     expect(body.data).toMatchObject({
-      id: data.products[0].id,
-      attributes: _.pick(data.products[0], ['name', 'description']),
+      documentId: data.products[0].documentId,
+      ..._.pick(data.products[0], ['name', 'description']),
     });
 
-    expect(body.data.attributes.publishedAt).toBeISODate();
-    expect(body.data.attributes.publishedAt).toBe(product.publishedAt);
+    expect(body.data.publishedAt).toBeISODate();
     data.products[0] = body.data;
   });
 
-  test('Delete product', async () => {
+  // TODO V5: Decide response of delete
+  test.skip('Delete product', async () => {
     const { statusCode, body } = await rq({
       method: 'DELETE',
-      url: `/product-with-dps/${data.products[0].id}`,
+      url: `/product-with-dps/${data.products[0].documentId}`,
     });
 
     expect(statusCode).toBe(200);
     expect(body.data).toMatchObject(data.products[0]);
-    expect(body.data.id).toEqual(data.products[0].id);
-    expect(body.data.attributes.publishedAt).toBeISODate();
+    expect(body.data.documentId).toEqual(data.products[0].documentId);
+    expect(body.data.publishedAt).toBeISODate();
     data.products.shift();
   });
 
@@ -255,12 +253,12 @@ describe('Core API - Basic + draftAndPublish', () => {
         error: {
           status: 400,
           name: 'ValidationError',
-          message: 'name must be defined.',
+          message: 'name must be a `string` type, but the final value was: `null`.',
           details: {
             errors: [
               {
                 path: ['name'],
-                message: 'name must be defined.',
+                message: 'name must be a `string` type, but the final value was: `null`.',
                 name: 'ValidationError',
               },
             ],

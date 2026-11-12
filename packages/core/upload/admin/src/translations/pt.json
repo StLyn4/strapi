@@ -12,7 +12,7 @@
   "control-card.save": "Guardar",
   "filter.add": "Adicionar filtro",
   "form.button.replace-media": "Substituir média",
-  "form.input.decription.file-alt": "Esse texto será mostrado se a imagem não puder ser carregada.",
+  "form.input.description.file-alt": "Esse texto será mostrado se a imagem não puder ser carregada.",
   "form.input.label.file-alt": "Texto alternativo",
   "form.input.label.file-caption": "Legenda",
   "form.input.label.file-name": "Nome do ficheiro",
@@ -66,7 +66,5 @@
   "sort.name_asc": "Ordem alfabética (A ao Z)",
   "sort.name_desc": "Ordem alfabética reversa (Z ao A)",
   "sort.updated_at_asc": "Atualizações mais antigas",
-  "sort.updated_at_desc": "Atualizações mais recentes",
-  "window.confirm.close-modal.file": "Tem a certeza? As suas alterações serão perdidas.",
-  "window.confirm.close-modal.files": "Tem a certeza? Alguns ficheiros ainda não foram enviados."
+  "sort.updated_at_desc": "Atualizações mais recentes"
 }

@@ -1,15 +1,28 @@
-import type * as Koa from 'koa';
 import type {} from 'koa-body';
 
 type ID = number | string;
 
 export type Data = {
   id?: ID;
+  __component?: string;
+  __type?: string;
   [key: string]: string | number | ID | boolean | null | undefined | Date | Data | Data[];
 };
 
-export interface Config {
-  get<T = unknown>(key: string, defaultVal?: T): T;
+/**
+ * A document or component entry as traversal sees it. Values are `unknown`: traversal reads
+ * only the keys that the schema describes and leaves every other value untouched.
+ */
+export type Entry = {
+  __type?: string;
+  __component?: string;
+  [key: string]: unknown;
+};
+
+export type Config = Record<string, unknown>;
+
+export interface RelationOrderingOptions {
+  strict?: boolean;
 }
 
 export interface Attribute {
@@ -60,10 +73,7 @@ export interface ScalarAttribute extends Attribute {
 }
 
 export type AnyAttribute =
-  | ScalarAttribute
-  | RelationalAttribute
-  | ComponentAttribute
-  | DynamicZoneAttribute;
+  ScalarAttribute | RelationalAttribute | ComponentAttribute | DynamicZoneAttribute;
 
 export type Kind = 'singleType' | 'collectionType';
 
@@ -82,33 +92,6 @@ export interface Model {
   };
   privateAttributes?: string[];
   attributes: Record<string, AnyAttribute>;
-}
-
-declare module 'koa' {
-  interface Request extends Koa.BaseRequest {
-    route: RouteInfo;
-  }
-
-  interface ExtendableContext {
-    ok: (response?: string | object) => Koa.Context;
-    created: (response?: string | object) => Koa.Context;
-    noContent: (response?: string | object) => Koa.Context;
-    badRequest: (response?: string | object) => Koa.Context;
-    unauthorized: (response?: string | object) => Koa.Context;
-    forbidden: (response?: string | object) => Koa.Context;
-    notFound: (response?: string | object) => Koa.Context;
-    locked: (response?: string | object) => Koa.Context;
-    internalServerError: (response?: string | object) => Koa.Context;
-    notImplemented: (response?: string | object) => Koa.Context;
-  }
-}
-
-export interface RouteInfo {
-  endpoint: string;
-  controller: string;
-  action: string;
-  verb: string;
-  plugin: string;
 }
 
 export type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };

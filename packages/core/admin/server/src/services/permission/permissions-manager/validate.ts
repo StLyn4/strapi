@@ -1,21 +1,17 @@
-import { subject as asSubject, detectSubjectType } from '@casl/ability';
-import { permittedFieldsOf } from '@casl/ability/extra';
-import {
-  defaults,
-  omit,
-  isArray,
-  isEmpty,
-  isNil,
-  flatMap,
-  some,
-  prop,
-  uniq,
-  intersection,
-  getOr,
-  isObject,
-} from 'lodash/fp';
+import { omit, defaults, isEmpty, intersection, get, isObject } from 'lodash';
+import { subject as asSubject } from '@casl/ability';
 
-import { contentTypes, traverseEntity, traverse, validate, pipeAsync, errors } from '@strapi/utils';
+import {
+  contentTypes,
+  traverseEntity,
+  traverse,
+  validate,
+  async,
+  errors,
+  createModelCache,
+} from '@strapi/utils';
+import { createPermissionFieldsCache } from './permission-fields';
+
 import { ADMIN_USER_ALLOWED_FIELDS } from '../../../domain/user';
 
 const { ValidationError } = errors;
@@ -25,6 +21,7 @@ const { constants, isScalarAttribute, getNonVisibleAttributes, getWritableAttrib
   contentTypes;
 const {
   ID_ATTRIBUTE,
+  DOC_ID_ATTRIBUTE,
   CREATED_AT_ATTRIBUTE,
   UPDATED_AT_ATTRIBUTE,
   PUBLISHED_AT_ATTRIBUTE,
@@ -34,14 +31,24 @@ const {
 
 const COMPONENT_FIELDS = ['__component'];
 
-const STATIC_FIELDS = [ID_ATTRIBUTE];
+const STATIC_FIELDS = [ID_ATTRIBUTE, DOC_ID_ATTRIBUTE];
 
-const throwInvalidParam = ({ key }: any) => {
-  throw new ValidationError(`Invalid parameter ${key}`);
+const throwInvalidKey = ({ key, path }: { key: string; path?: string | null }) => {
+  const msg = path && path !== key ? `Invalid key ${key} at ${path}` : `Invalid key ${key}`;
+
+  throw new ValidationError(msg);
 };
 
 export default ({ action, ability, model }: any) => {
   const schema = strapi.getModel(model);
+
+  // Create request-scoped model cache to avoid redundant getModel() calls
+  const modelCache = createModelCache(strapi.getModel.bind(strapi));
+
+  const ctx = {
+    schema,
+    getModel: modelCache.getModel,
+  };
 
   const createValidateQuery = (options = {} as any) => {
     const { fields } = options;
@@ -49,37 +56,66 @@ export default ({ action, ability, model }: any) => {
     // TODO: validate relations to admin users in all validators
     const permittedFields = fields.shouldIncludeAll ? null : getQueryFields(fields.permitted);
 
-    const validateFilters = pipeAsync(
-      traverse.traverseQueryFilters(throwDisallowedFields(permittedFields), { schema }),
-      traverse.traverseQueryFilters(throwDisallowedAdminUserFields, { schema }),
-      traverse.traverseQueryFilters(throwPassword, { schema }),
-      traverse.traverseQueryFilters(
-        ({ key, value }) => {
+    const createValidateFilters = (ctx: any) =>
+      async.pipe(
+        traverse.traverseQueryFilters(throwDisallowedFields(permittedFields), ctx),
+        traverse.traverseQueryFilters(throwDisallowedAdminUserFields, ctx),
+        traverse.traverseQueryFilters(throwPassword, ctx),
+        traverse.traverseQueryFilters(({ key, value, path }) => {
           if (isObject(value) && isEmpty(value)) {
-            throwInvalidParam({ key });
+            throwInvalidKey({ key, path: path.attribute });
           }
-        },
-        { schema }
-      )
-    );
+        }, ctx)
+      );
 
-    const validateSort = pipeAsync(
-      traverse.traverseQuerySort(throwDisallowedFields(permittedFields), { schema }),
-      traverse.traverseQuerySort(throwDisallowedAdminUserFields, { schema }),
-      traverse.traverseQuerySort(throwPassword, { schema }),
-      traverse.traverseQuerySort(
-        ({ key, attribute, value }) => {
+    const createValidateSort = (ctx: any) =>
+      async.pipe(
+        traverse.traverseQuerySort(throwDisallowedFields(permittedFields), ctx),
+        traverse.traverseQuerySort(throwDisallowedAdminUserFields, ctx),
+        traverse.traverseQuerySort(throwPassword, ctx),
+        traverse.traverseQuerySort(({ key, attribute, value, path }) => {
           if (!isScalarAttribute(attribute) && isEmpty(value)) {
-            throwInvalidParam({ key });
+            throwInvalidKey({ key, path: path.attribute });
           }
-        },
-        { schema }
-      )
-    );
+        }, ctx)
+      );
 
-    const validateFields = pipeAsync(
-      traverse.traverseQueryFields(throwDisallowedFields(permittedFields), { schema }),
-      traverse.traverseQueryFields(throwPassword, { schema })
+    const createValidateFields = (ctx: any) =>
+      async.pipe(
+        traverse.traverseQueryFields(throwDisallowedFields(permittedFields), ctx),
+        traverse.traverseQueryFields(throwPassword, ctx)
+      );
+
+    const validateFilters = createValidateFilters(ctx);
+    const validateSort = createValidateSort(ctx);
+    const validateFields = createValidateFields(ctx);
+
+    const validateNestedPopulate = async ({ key, value, schema, attribute, getModel }: any) => {
+      if (attribute) {
+        return;
+      }
+
+      const nestedCtx = { schema, getModel };
+
+      if (key === 'sort') {
+        await createValidateSort(nestedCtx)(value);
+      }
+
+      if (key === 'filters') {
+        await createValidateFilters(nestedCtx)(value);
+      }
+
+      if (key === 'fields') {
+        await createValidateFields(nestedCtx)(value);
+      }
+    };
+
+    const validatePopulate = async.pipe(
+      traverse.traverseQueryPopulate(throwDisallowedFields(permittedFields), ctx),
+      traverse.traverseQueryPopulate(throwDisallowedAdminUserFields, ctx),
+      traverse.traverseQueryPopulate(throwHiddenFields, ctx),
+      traverse.traverseQueryPopulate(throwPassword, ctx),
+      traverse.traverseQueryPopulate(validateNestedPopulate, ctx)
     );
 
     return async (query: any) => {
@@ -95,6 +131,11 @@ export default ({ action, ability, model }: any) => {
         await validateFields(query.fields);
       }
 
+      // a wildcard is always valid; its conversion will be handled by the entity service and can be optimized with sanitizer
+      if (query.populate && query.populate !== '*') {
+        await validatePopulate(query.populate);
+      }
+
       return true;
     };
   };
@@ -104,41 +145,37 @@ export default ({ action, ability, model }: any) => {
 
     const permittedFields = fields.shouldIncludeAll ? null : getInputFields(fields.permitted);
 
-    return pipeAsync(
+    return async.pipe(
       // Remove fields hidden from the admin
-      traverseEntity(throwHiddenFields, { schema }),
+      traverseEntity(throwHiddenFields, ctx),
       // Remove not allowed fields (RBAC)
-      // @ts-expect-error lodash types
-      traverseEntity(throwDisallowedFields(permittedFields), { schema }),
+      traverseEntity(throwDisallowedFields(permittedFields), ctx),
       // Remove roles from createdBy & updatedBy fields
       omitCreatorRoles
     );
   };
 
   const wrapValidate = (createValidateFunction: any) => {
+    const { getPermissionFields } = createPermissionFieldsCache(ability);
+
     // TODO
     // @ts-expect-error define the correct return type
     const wrappedValidate = async (data, options = {}): Promise<unknown> => {
-      if (isArray(data)) {
+      if (Array.isArray(data)) {
         return Promise.all(data.map((entity: unknown) => wrappedValidate(entity, options)));
       }
 
       const { subject, action: actionOverride } = getDefaultOptions(data, options);
 
-      const permittedFields = permittedFieldsOf(ability, actionOverride, subject, {
-        fieldsFrom: (rule) => rule.fields || [],
-      });
-
-      const hasAtLeastOneRegistered = some(
-        (fields) => !isNil(fields),
-        flatMap(prop('fields'), ability.rulesFor(actionOverride, detectSubjectType(subject)))
+      const { permittedFields, hasAtLeastOneRegistered, shouldIncludeAll } = getPermissionFields(
+        actionOverride,
+        subject
       );
-      const shouldIncludeAllFields = isEmpty(permittedFields) && !hasAtLeastOneRegistered;
 
       const validateOptions = {
         ...options,
         fields: {
-          shouldIncludeAll: shouldIncludeAllFields,
+          shouldIncludeAll,
           permitted: permittedFields,
           hasAtLeastOneRegistered,
         },
@@ -153,31 +190,32 @@ export default ({ action, ability, model }: any) => {
   };
 
   const getDefaultOptions = (data: any, options: unknown) => {
-    return defaults({ subject: asSubject(model, data), action }, options);
+    return defaults({}, options, { subject: asSubject(model, data), action });
   };
 
   /**
    * Omit creator fields' (createdBy & updatedBy) roles from the admin API responses
    */
-  const omitCreatorRoles = omit([`${CREATED_BY_ATTRIBUTE}.roles`, `${UPDATED_BY_ATTRIBUTE}.roles`]);
+  const omitCreatorRoles = <T extends object>(data: T) =>
+    omit(data, [`${CREATED_BY_ATTRIBUTE}.roles`, `${UPDATED_BY_ATTRIBUTE}.roles`]);
 
   /**
    * Visitor used to remove hidden fields from the admin API responses
    */
-  const throwHiddenFields = ({ key, schema }: any) => {
-    const isHidden = getOr(false, ['config', 'attributes', key, 'hidden'], schema);
+  const throwHiddenFields = ({ key, schema, path }: any) => {
+    const isHidden = get(schema, ['config', 'attributes', key, 'hidden'], false);
 
     if (isHidden) {
-      throwInvalidParam({ key });
+      throwInvalidKey({ key, path: path.attribute });
     }
   };
 
   /**
    * Visitor used to omit disallowed fields from the admin users entities & avoid leaking sensitive information
    */
-  const throwDisallowedAdminUserFields = ({ key, attribute, schema }: any) => {
+  const throwDisallowedAdminUserFields = ({ key, attribute, schema, path }: any) => {
     if (schema.uid === 'admin::user' && attribute && !ADMIN_USER_ALLOWED_FIELDS.includes(key)) {
-      throwInvalidParam({ key });
+      throwInvalidKey({ key, path: path.attribute });
     }
   };
 
@@ -185,20 +223,22 @@ export default ({ action, ability, model }: any) => {
     const nonVisibleAttributes = getNonVisibleAttributes(schema);
     const writableAttributes = getWritableAttributes(schema);
 
-    const nonVisibleWritableAttributes = intersection(nonVisibleAttributes, writableAttributes);
+    const nonVisibleWritableAttributes = intersection(writableAttributes, nonVisibleAttributes);
 
-    return uniq([...fields, ...COMPONENT_FIELDS, ...nonVisibleWritableAttributes]);
+    return [...new Set([...fields, ...COMPONENT_FIELDS, ...nonVisibleWritableAttributes])];
   };
 
   const getQueryFields = (fields = []) => {
-    return uniq([
-      ...fields,
-      ...STATIC_FIELDS,
-      ...COMPONENT_FIELDS,
-      CREATED_AT_ATTRIBUTE,
-      UPDATED_AT_ATTRIBUTE,
-      PUBLISHED_AT_ATTRIBUTE,
-    ]);
+    return [
+      ...new Set([
+        ...fields,
+        ...STATIC_FIELDS,
+        ...COMPONENT_FIELDS,
+        CREATED_AT_ATTRIBUTE,
+        UPDATED_AT_ATTRIBUTE,
+        PUBLISHED_AT_ATTRIBUTE,
+      ]),
+    ];
   };
 
   return {

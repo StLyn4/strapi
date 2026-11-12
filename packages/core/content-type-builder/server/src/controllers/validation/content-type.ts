@@ -1,9 +1,10 @@
+import { get, has, snakeCase } from 'lodash';
 /* eslint-disable no-template-curly-in-string */ // yup templates need to be in this format
 
-import { flatMap, getOr, has, snakeCase } from 'lodash/fp';
 import { yup, validateYupSchema } from '@strapi/utils';
 
-import type { Schema, UID } from '@strapi/types';
+import type { Struct, Internal, UID } from '@strapi/types';
+
 import { getService } from '../../utils';
 import { modelTypes, DEFAULT_TYPES, typeKinds } from '../../services/constants';
 import { createSchema } from './model-schema';
@@ -12,19 +13,24 @@ import { nestedComponentSchema } from './component';
 
 // Input flattens some fields of the "info" into the root type
 export type CreateContentTypeInput = {
-  contentType?: Partial<Schema.ContentType> & Partial<Schema.ContentTypeInfo>;
-  components?: Array<Partial<Schema.Component> & Partial<Schema.Info> & { tmpUID?: UID.Component }>;
-  singularName: Schema.ContentTypeInfo['singularName'];
-  attributes: Schema.Attributes & Record<string, any>;
-  kind: Schema.ContentTypeKind;
-  collectionName?: Schema.CollectionType['collectionName'];
-  pluralName: Schema.ContentTypeInfo['pluralName'];
-  displayName: Schema.ContentTypeInfo['displayName'];
-  description: Schema.ContentTypeInfo['description'];
-  options?: Schema.Options;
-  draftAndPublish?: Schema.Options['draftAndPublish'];
-  pluginOptions?: Schema.ContentType['pluginOptions'];
+  uid?: UID.ContentType;
+  contentType?: Partial<Struct.ContentTypeSchema> & Partial<Struct.ContentTypeSchemaInfo>;
+  components?: Array<
+    Partial<Struct.ComponentSchema> &
+      Partial<Struct.SchemaInfo> & { tmpUID?: Internal.UID.Component }
+  >;
+  singularName: Struct.ContentTypeSchemaInfo['singularName'];
+  attributes: Struct.SchemaAttributes & Record<string, any>;
+  kind: Struct.ContentTypeKind;
+  collectionName?: Struct.CollectionTypeSchema['collectionName'];
+  pluralName: Struct.ContentTypeSchemaInfo['pluralName'];
+  displayName: Struct.ContentTypeSchemaInfo['displayName'];
+  description?: Struct.ContentTypeSchemaInfo['description'];
+  options?: Struct.SchemaOptions;
+  draftAndPublish?: Struct.SchemaOptions['draftAndPublish'];
+  pluginOptions?: Struct.ContentTypeSchema['pluginOptions'];
   config?: object;
+  plugin?: string;
 };
 
 /**
@@ -60,11 +66,12 @@ const VALID_TYPES = [...DEFAULT_TYPES, 'uid', 'component', 'dynamiczone', 'custo
  * Returns a yup schema to validate a content type payload
  */
 const createContentTypeSchema = (data: CreateContentTypeInput, { isEdition = false } = {}) => {
-  const kind: keyof typeof VALID_RELATIONS = getOr(
-    typeKinds.COLLECTION_TYPE,
+  const kind: keyof typeof VALID_RELATIONS = get(
+    data,
     'contentType.kind',
-    data
+    typeKinds.COLLECTION_TYPE
   );
+
   const contentTypeSchema = createSchema(VALID_TYPES, VALID_RELATIONS[kind] || [], {
     modelType: modelTypes.CONTENT_TYPE,
   })
@@ -117,15 +124,15 @@ export const validateContentTypeInput = (data: CreateContentTypeInput) => {
  * Validator for content type edition
  */
 export const validateUpdateContentTypeInput = (data: CreateContentTypeInput) => {
-  if (has('contentType', data)) {
+  if (has(data, 'contentType')) {
     removeEmptyDefaults(data.contentType);
-    removeDeletedUIDTargetFields(data.contentType as Schema.ContentType);
+    removeDeletedUIDTargetFields(data.contentType as Struct.ContentTypeSchema);
   }
 
-  if (has('components', data) && Array.isArray(data.components)) {
+  if (has(data, 'components') && Array.isArray(data.components)) {
     data.components.forEach((comp) => {
-      if (has('uid', comp)) {
-        removeEmptyDefaults(comp as Schema.Component);
+      if (has(comp, 'uid')) {
+        removeEmptyDefaults(comp as Struct.ComponentSchema);
       }
     });
   }
@@ -143,17 +150,16 @@ const forbiddenContentTypeNameValidator = () => {
       if (typeof value !== 'string') {
         return true;
       }
-      // compare snake case to check the actual column names that will be used in the database
-      return reservedNames.every((reservedName) => snakeCase(reservedName) !== snakeCase(value));
+
+      return !getService('builder').isReservedModelName(value);
     },
   };
 };
 
 const nameIsAvailable = (isEdition: boolean) => {
-  // TODO TS: if strapi.contentTypes (ie, ContentTypes) works as an ArrayLike and is used like this, we may want to ensure it is typed so that it can be without using as
-  const usedNames = flatMap((ct: Schema.ContentType) => {
+  const usedNames = Object.values(strapi.contentTypes).flatMap((ct) => {
     return [ct.info?.singularName, ct.info?.pluralName];
-  })(strapi.contentTypes as any);
+  });
 
   return {
     name: 'nameAlreadyUsed',
@@ -175,7 +181,7 @@ const nameIsAvailable = (isEdition: boolean) => {
 
 const nameIsNotExistingCollectionName = (isEdition: boolean) => {
   const usedNames = Object.keys(strapi.contentTypes).map(
-    (key) => strapi.contentTypes[key as UID.ContentType].collectionName
+    (key) => strapi.contentTypes[key as Internal.UID.ContentType].collectionName
   ) as string[];
 
   return {

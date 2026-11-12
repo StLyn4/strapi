@@ -1,14 +1,14 @@
-import { MultiSelectNested } from '@strapi/design-system';
+import { Field, MultiSelectNested } from '@strapi/design-system';
 import upperFirst from 'lodash/upperFirst';
 import { useIntl } from 'react-intl';
 
-import { IntlLabel } from '../types';
+import type { FormChangeHandler, IntlLabel } from '../types';
 
 interface AllowedTypesSelectProps {
   intlLabel: IntlLabel;
   name: string;
-  onChange: (value: any) => void;
-  value?: any;
+  onChange: FormChangeHandler<string[] | null, 'allowed-types-select'>;
+  value?: string[] | null;
 }
 
 const options = [
@@ -47,19 +47,20 @@ export const AllowedTypesSelect = ({
     : name;
 
   return (
-    <MultiSelectNested
-      id="select1"
-      label={label}
-      customizeContent={() => displayedValue}
-      onChange={(values: any[]) => {
-        if (values.length > 0) {
-          onChange({ target: { name, value: values, type: 'allowed-types-select' } });
-        } else {
-          onChange({ target: { name, value: null, type: 'allowed-types-select' } });
-        }
-      }}
-      options={options}
-      value={value || []}
-    />
+    <Field.Root name={name}>
+      <Field.Label>{label}</Field.Label>
+      <MultiSelectNested
+        customizeContent={() => displayedValue}
+        onChange={(values: string[]) => {
+          if (values.length > 0) {
+            onChange({ target: { name, value: values, type: 'allowed-types-select' } });
+          } else {
+            onChange({ target: { name, value: null, type: 'allowed-types-select' } });
+          }
+        }}
+        options={options}
+        value={value || []}
+      />
+    </Field.Root>
   );
 };

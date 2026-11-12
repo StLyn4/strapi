@@ -1,6 +1,8 @@
 import pagination from './pagination';
 import buildResponseCollectionMeta from './response-collection-meta';
-import publicationState from './publication-state';
+import buildDeleteMutationResponse from './delete-mutation-response';
+import publicationStatus from './publication-status';
+import publicationFilter from './publication-filter';
 import filters from './filters';
 import error from './error';
 import type { Context } from '../../types';
@@ -15,10 +17,12 @@ export default (context: Context) => () => {
       error: error(context),
       pagination: pagination(context),
       responseCollectionMeta: buildResponseCollectionMeta(context),
+      deleteDocumentResponse: buildDeleteMutationResponse(context),
     },
 
     [KINDS.enum]: {
-      publicationState: publicationState(context),
+      publicationStatus: publicationStatus(context),
+      publicationFilter: publicationFilter(context),
     },
 
     [KINDS.filtersInput]: {

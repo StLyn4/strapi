@@ -1,22 +1,23 @@
-import { entries, mapValues, omit } from 'lodash/fp';
-import { pagination, contentTypes } from '@strapi/utils';
-import type { Strapi, Schema } from '@strapi/types';
+import { mapValues, omit } from 'lodash';
+import { idArg, nonNull } from 'nexus';
+import { hasSort, pagination } from '@strapi/utils';
+import type { Core, Struct } from '@strapi/types';
 
 const { withDefaultPagination } = pagination;
-const { hasDraftAndPublish } = contentTypes;
 
-export default ({ strapi }: { strapi: Strapi }) => {
+type ContentTypeArgsOptions = {
+  multiple?: boolean;
+  isNested?: boolean;
+};
+
+export default ({ strapi }: { strapi: Core.Strapi }) => {
   const { service: getService } = strapi.plugin('graphql');
 
   return {
-    /**
-     * Get every args for a given content type
-     * @param {object} contentType
-     * @param {object} options
-     * @param {boolean} options.multiple
-     * @return {object}
-     */
-    getContentTypeArgs(contentType: Schema.Any, { multiple = true } = {}) {
+    getContentTypeArgs(
+      contentType: Struct.Schema,
+      { multiple = true, isNested = false }: ContentTypeArgsOptions = {}
+    ) {
       const { naming } = getService('utils');
       const { args } = getService('internals');
 
@@ -35,20 +36,43 @@ export default ({ strapi }: { strapi: Strapi }) => {
 
       const { kind } = contentType;
 
+      // On non–D&P roots (e.g. User) these args do not version the parent document, but they
+      // are required: association resolvers inherit them into nested D&P relations (see
+      // builders/resolvers/association.ts + rootQueryArgsByPath). Omitting them broke
+      // draft/published control for populated relations (e.g. github.com/strapi/strapi/issues/25746).
+      //
+      // Future direction: add `status` / `hasPublishedVersion` / `publicationFilter` to GraphQL args on nested
+      // to-many (and to-one) relation fields when the *target* content type has D&P, instead
+      // of relying on root-level “context” that is easy to misread (args on User affecting
+      // Articles). That would allow different publication settings per relation branch, match
+      // how developers think about the graph, and let non-DP roots drop these args if desired.
+      // Would require extending getContentTypeArgs(..., { isNested: true }) for D&P targets
+      // and teaching association.ts to honor args.publicationFilter on nested fields, not
+      // only root inheritance.
+      const publicationArgs = {
+        status: args.PublicationStatusArg,
+        // Deprecated: prefer `publicationFilter` (enum cohorts).
+        hasPublishedVersion: args.HasPublishedVersionArg,
+        publicationFilter: args.PublicationFilterArg,
+      };
+
       // Collection Types
       if (kind === 'collectionType') {
         if (!multiple) {
-          return { id: 'ID' };
+          return {
+            documentId: nonNull(idArg()),
+            ...publicationArgs,
+          };
         }
 
-        const params = {
+        const params: Record<string, unknown> = {
           filters: naming.getFiltersInputTypeName(contentType),
           pagination: args.PaginationArg,
           sort: args.SortArg,
         };
 
-        if (hasDraftAndPublish(contentType)) {
-          Object.assign(params, { publicationState: args.PublicationStateArg });
+        if (!isNested) {
+          Object.assign(params, publicationArgs);
         }
 
         return params;
@@ -56,10 +80,10 @@ export default ({ strapi }: { strapi: Strapi }) => {
 
       // Single Types
       if (kind === 'singleType') {
-        const params = {};
+        const params: Record<string, unknown> = {};
 
-        if (hasDraftAndPublish(contentType)) {
-          Object.assign(params, { publicationState: args.PublicationStateArg });
+        if (!isNested) {
+          Object.assign(params, publicationArgs);
         }
 
         return params;
@@ -69,10 +93,10 @@ export default ({ strapi }: { strapi: Strapi }) => {
     /**
      * Filter an object entries and keep only those whose value is a unique scalar attribute
      */
-    getUniqueScalarAttributes(attributes: Schema.Attributes) {
+    getUniqueScalarAttributes(attributes: Struct.SchemaAttributes) {
       const { isStrapiScalar } = getService('utils').attributes;
 
-      const uniqueAttributes = entries(attributes).filter(
+      const uniqueAttributes = Object.entries(attributes ?? {}).filter(
         ([, attribute]) => isStrapiScalar(attribute) && 'unique' in attribute && attribute.unique
       );
 
@@ -84,14 +108,14 @@ export default ({ strapi }: { strapi: Strapi }) => {
      * @param {object} attributes - The attributes object to transform
      * @return {Object<string, string>}
      */
-    scalarAttributesToFiltersMap(attributes: Schema.Attributes) {
-      return mapValues((attribute) => {
+    scalarAttributesToFiltersMap(attributes: Struct.SchemaAttributes) {
+      return mapValues(attributes, (attribute) => {
         const { mappers, naming } = getService('utils');
 
         const gqlScalar = mappers.strapiScalarToGraphQLScalar(attribute.type);
 
         return naming.getScalarFilterInputTypeName(gqlScalar);
-      }, attributes);
+      });
     },
 
     /**
@@ -102,14 +126,14 @@ export default ({ strapi }: { strapi: Strapi }) => {
       {
         contentType,
         usePagination = false,
-      }: { contentType: Schema.ContentType; usePagination?: boolean }
+      }: { contentType: Struct.ContentTypeSchema; usePagination?: boolean }
     ) {
       const { mappers } = getService('utils');
       const { config } = strapi.plugin('graphql');
       const { pagination = {}, filters = {} } = args;
 
       // Init
-      const newArgs = omit(['pagination', 'filters'], args);
+      const newArgs = omit(args, ['pagination', 'filters']);
 
       // Pagination
       if (usePagination) {
@@ -133,6 +157,11 @@ export default ({ strapi }: { strapi: Strapi }) => {
         Object.assign(newArgs, {
           filters: mappers.graphQLFiltersToStrapiQuery(filters, contentType),
         });
+      }
+
+      // GraphQL SortArg defaults to `[]`; omit meaningless sort so join-table UI order is preserved.
+      if (!hasSort(newArgs.sort)) {
+        delete newArgs.sort;
       }
 
       return newArgs;

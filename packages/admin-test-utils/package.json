@@ -1,6 +1,6 @@
 {
   "name": "@strapi/admin-test-utils",
-  "version": "4.22.1",
+  "version": "5.62.0",
   "private": true,
   "description": "Test utilities for the Strapi administration panel",
   "license": "MIT",
@@ -52,6 +52,13 @@
       "source": "./src/global-setup.ts",
       "default": "./dist/global-setup.js"
     },
+    "./setup": {
+      "types": "./dist/setup.d.ts",
+      "module": "./dist/setup.mjs",
+      "require": "./dist/setup.js",
+      "source": "./src/setup.ts",
+      "default": "./dist/setup.js"
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.js",
@@ -59,29 +66,42 @@
   "source": "./src/index.ts",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "pack-up build",
+    "build": "run -T run-p build:code build:types",
+    "build:code": "run -T  rollup -c",
+    "build:types": "run -T tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "watch": "run -T run-p watch:code watch:types",
+    "watch:code": "run -T rollup -c -w",
+    "watch:types": "run -T tsc -p tsconfig.build.json --emitDeclarationOnly -w",
     "clean": "run -T rimraf ./dist",
-    "lint": "run -T eslint .",
-    "test:ts": "run -T tsc --noEmit",
-    "watch": "pack-up watch"
+    "lint": "run -T eslint . --max-warnings=0",
+    "test:ts": "run -T tsc -p tsconfig.json"
   },
   "dependencies": {
     "@juggle/resize-observer": "3.4.0",
+    "@testing-library/react": "16.3.2",
     "jest-styled-components": "7.1.1",
+    "react-query": "3.39.3",
     "whatwg-fetch": "3.6.2"
   },
   "devDependencies": {
     "@reduxjs/toolkit": "1.9.7",
-    "@strapi/pack-up": "workspace:*",
-    "@testing-library/jest-dom": "5.16.5",
-    "eslint-config-custom": "4.22.1",
-    "tsconfig": "4.22.1"
+    "@strapi/types": "5.62.0",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "eslint-config-custom": "5.62.0",
+    "jest-environment-jsdom": "29.6.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "styled-components": "6.4.1",
+    "tsconfig": "5.62.0"
   },
   "peerDependencies": {
     "@reduxjs/toolkit": "^1.9.7",
-    "@testing-library/jest-dom": "^5.16.5"
+    "@testing-library/jest-dom": "^6.0.0",
+    "jest-environment-jsdom": "^29.0.0",
+    "styled-components": "^6.0.0"
   },
   "engines": {
-    "node": ">=18.0.0 <=20.x.x"
+    "node": ">=22.0.0 <=26.x.x"
   }
 }

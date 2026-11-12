@@ -1,4 +1,8 @@
-import { getDeepPopulate } from '../populate';
+import {
+  getDeepPopulate,
+  getDeepPopulateDraftCount,
+  getPopulateForLocalizations,
+} from '../populate';
 
 describe('Populate', () => {
   const fakeModels = {
@@ -47,6 +51,39 @@ describe('Populate', () => {
       attributes: {
         mediaAttrName: {
           type: 'media',
+        },
+      },
+    },
+    withLocalizations: {
+      uid: 'api::article.article',
+      modelName: 'Fake model with localizations',
+      pluginOptions: { i18n: { localized: true } },
+      attributes: {
+        title: {
+          type: 'string',
+        },
+        localizations: {
+          type: 'relation',
+          relation: 'oneToMany',
+          target: 'api::article.article',
+          visible: false,
+        },
+      },
+    },
+    withLocalizationsNotLocalized: {
+      uid: 'api::product.product',
+      modelName: 'Fake non-localized model with localizations attribute',
+      pluginOptions: {},
+      attributes: {
+        name: {
+          type: 'string',
+        },
+        localizations: {
+          type: 'relation',
+          relation: 'oneToMany',
+          target: 'api::product.product',
+          visible: false,
+          private: true,
         },
       },
     },
@@ -150,8 +187,205 @@ describe('Populate', () => {
       const result = getDeepPopulate(uid as any);
 
       expect(result).toEqual({
-        mediaAttrName: { populate: 'folder' },
+        mediaAttrName: { populate: { folder: true } },
       });
+    });
+
+    describe('initialPopulate override', () => {
+      test('defaults to validation populate for localizations', () => {
+        const uid = 'withLocalizations';
+
+        const result = getDeepPopulate(uid as any) as Record<string, any>;
+
+        // Default behavior: localizations gets validation populate (populated via getPopulateForValidation)
+        expect(result).toHaveProperty('localizations');
+        expect(result.localizations).toHaveProperty('populate');
+      });
+
+      test('initialPopulate overrides localizations with minimal fields', () => {
+        const uid = 'withLocalizations';
+
+        const result = getDeepPopulate(uid as any, {
+          initialPopulate: {
+            localizations: { fields: ['locale', 'documentId', 'publishedAt', 'updatedAt'] },
+          } as any,
+        }) as Record<string, any>;
+
+        expect(result).toEqual({
+          localizations: {
+            fields: ['locale', 'documentId', 'publishedAt', 'updatedAt'],
+          },
+        });
+      });
+
+      test('initialPopulate with false suppresses localizations populate', () => {
+        const uid = 'withLocalizations';
+
+        const result = getDeepPopulate(uid as any, {
+          initialPopulate: {
+            localizations: false,
+          } as any,
+        }) as Record<string, any>;
+
+        expect(result).toEqual({
+          localizations: false,
+        });
+      });
+
+      test('initialPopulate override works for any relation attribute', () => {
+        const uid = 'relationOTM';
+
+        const result = getDeepPopulate(uid as any, {
+          initialPopulate: {
+            relationAttrName: { fields: ['id', 'name'] },
+          } as any,
+        }) as Record<string, any>;
+
+        expect(result).toEqual({
+          relationAttrName: { fields: ['id', 'name'] },
+        });
+      });
+    });
+  });
+
+  describe('getDeepPopulateDraftCount', () => {
+    const draftCountModels = {
+      'api::article.article': {
+        uid: 'api::article.article',
+        attributes: {
+          category: {
+            type: 'relation',
+            relation: 'manyToOne',
+            target: 'api::category.category',
+          },
+          author: {
+            type: 'relation',
+            relation: 'manyToOne',
+            target: 'api::author.author',
+          },
+        },
+      },
+      // Separate source model: results are cached per uid
+      'api::page.page': {
+        uid: 'api::page.page',
+        attributes: {
+          category: {
+            type: 'relation',
+            relation: 'manyToOne',
+            target: 'api::category.category',
+          },
+        },
+      },
+      'api::category.category': {
+        uid: 'api::category.category',
+        pluginOptions: { i18n: { localized: true } },
+        options: { draftAndPublish: true },
+        attributes: {},
+      },
+      'api::author.author': {
+        uid: 'api::author.author',
+        options: { draftAndPublish: true },
+        attributes: {},
+      },
+    } as any;
+
+    beforeEach(() => {
+      global.strapi = {
+        getModel: jest.fn((uid) => draftCountModels[uid]),
+        localization: {
+          isLocalizedContentType: jest.fn(
+            (model: { pluginOptions?: { i18n?: { localized?: boolean } } }) =>
+              model.pluginOptions?.i18n?.localized === true
+          ),
+        },
+      } as any;
+    });
+
+    afterEach(() => {
+      jest.clearAllMocks();
+    });
+
+    test('selects locale only for relations targeting localized content types', () => {
+      const result = getDeepPopulateDraftCount('api::article.article' as any);
+
+      expect(result).toEqual({
+        hasRelations: true,
+        populate: {
+          category: {
+            fields: ['documentId', 'locale'],
+            filters: { publishedAt: { $null: true } },
+          },
+          author: {
+            fields: ['documentId'],
+            filters: { publishedAt: { $null: true } },
+          },
+        },
+      });
+    });
+
+    test('follows the provider over a stale localized flag', () => {
+      jest.mocked(strapi.localization.isLocalizedContentType).mockReturnValue(false);
+
+      const result = getDeepPopulateDraftCount('api::page.page' as any);
+
+      expect(result.populate.category).toEqual({
+        fields: ['documentId'],
+        filters: { publishedAt: { $null: true } },
+      });
+    });
+  });
+
+  describe('getPopulateForLocalizations', () => {
+    const localizationsModels = {
+      'api::localized.localized': {
+        uid: 'api::localized.localized',
+        pluginOptions: { i18n: { localized: true } },
+        attributes: {},
+      },
+      'api::not-localized.not-localized': {
+        uid: 'api::not-localized.not-localized',
+        pluginOptions: { i18n: { localized: false } },
+        attributes: {},
+      },
+      'api::no-plugin-options.no-plugin-options': {
+        uid: 'api::no-plugin-options.no-plugin-options',
+        attributes: {},
+      },
+    } as any;
+
+    beforeEach(() => {
+      global.strapi = {
+        getModel: jest.fn((uid) => localizationsModels[uid]),
+        localization: {
+          isLocalizedContentType: jest.fn(
+            (model: { pluginOptions?: { i18n?: { localized?: boolean } } }) =>
+              model.pluginOptions?.i18n?.localized === true
+          ),
+        },
+      } as any;
+    });
+
+    afterEach(() => {
+      jest.clearAllMocks();
+    });
+
+    test('restricts localizations to metadata fields for localized content types', () => {
+      expect(getPopulateForLocalizations('api::localized.localized' as any)).toEqual({
+        localizations: { fields: ['locale', 'documentId', 'publishedAt', 'updatedAt'] },
+      });
+    });
+
+    test('returns an empty populate for non-localized content types', () => {
+      expect(getPopulateForLocalizations('api::not-localized.not-localized' as any)).toEqual({});
+      expect(
+        getPopulateForLocalizations('api::no-plugin-options.no-plugin-options' as any)
+      ).toEqual({});
+    });
+
+    test('follows the provider over a stale localized flag', () => {
+      jest.mocked(strapi.localization.isLocalizedContentType).mockReturnValue(false);
+
+      expect(getPopulateForLocalizations('api::localized.localized' as any)).toEqual({});
     });
   });
 });

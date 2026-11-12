@@ -1,34 +1,48 @@
-import React, { useMemo } from 'react';
+import * as React from 'react';
 
-import { BaseCheckbox, Box, Flex, Typography } from '@strapi/design-system';
-import { CarretDown } from '@strapi/icons';
+import {
+  Checkbox,
+  Box,
+  BoxComponent,
+  Flex,
+  FlexComponent,
+  Typography,
+  TypographyComponent,
+} from '@strapi/design-system';
+import { CaretDown } from '@strapi/icons';
 import get from 'lodash/get';
 import { useIntl } from 'react-intl';
-import styled, { DefaultTheme, css } from 'styled-components';
+import { styled, DefaultTheme, css } from 'styled-components';
 
 import { Action, SubjectProperty } from '../../../../../../../shared/contracts/permissions';
-import { capitalise } from '../../../../../utils/strings';
 import {
   PermissionsDataManagerContextValue,
   usePermissionsDataManager,
 } from '../hooks/usePermissionsDataManager';
 import { cellWidth, firstRowWidth, rowHeight } from '../utils/constants';
 import { getCheckboxState } from '../utils/getCheckboxState';
+import { getLocaleValidationErrorActionKeys } from '../utils/localePermissionValidation';
 
 import { CollapseLabel } from './CollapseLabel';
 import { HiddenAction } from './HiddenAction';
 import { RequiredSign } from './RequiredSign';
 import { RowLabelWithCheckbox, RowLabelWithCheckboxProps } from './RowLabelWithCheckbox';
+import { UnheldPermissionTooltip } from './UnheldPermissionTooltip';
+
+const EMPTY_AVAILABLE_ACTIONS: NonNullable<CollapsePropertyMatrixProps['availableActions']> = [];
+const EMPTY_CHILDREN_FORM: NonNullable<CollapsePropertyMatrixProps['childrenForm']> = [];
+const EMPTY_ACTION_ROW_CHILDREN_FORM: NonNullable<ActionRowProps['childrenForm']> = [];
+const EMPTY_SUB_ACTION_ROW_CHILDREN_FORM: NonNullable<SubActionRowProps['childrenForm']> = [];
+const EMPTY_HEADERS: NonNullable<HeaderProps['headers']> = [];
 
 /* -------------------------------------------------------------------------------------------------
  * CollapsePropertyMatrix
  * -----------------------------------------------------------------------------------------------*/
 
-interface CollapsePropertyMatrixProps
-  extends Pick<
-    ActionRowProps,
-    'childrenForm' | 'isFormDisabled' | 'label' | 'pathToData' | 'propertyName'
-  > {
+interface CollapsePropertyMatrixProps extends Pick<
+  ActionRowProps,
+  'childrenForm' | 'isFormDisabled' | 'label' | 'pathToData' | 'propertyName' | 'subject'
+> {
   availableActions?: Array<Action & { isDisplayed: boolean }>;
 }
 
@@ -39,14 +53,17 @@ interface PropertyAction {
 }
 
 const CollapsePropertyMatrix = ({
-  availableActions = [],
-  childrenForm = [],
+  availableActions = EMPTY_AVAILABLE_ACTIONS,
+  childrenForm = EMPTY_CHILDREN_FORM,
   isFormDisabled,
   label,
   pathToData,
   propertyName,
+  subject,
 }: CollapsePropertyMatrixProps) => {
-  const propertyActions = useMemo(
+  const { formatMessage, formatList } = useIntl();
+  const { modifiedData } = usePermissionsDataManager();
+  const propertyActions = React.useMemo(
     () =>
       availableActions.map((action) => {
         const isActionRelatedToCurrentProperty =
@@ -59,9 +76,38 @@ const CollapsePropertyMatrix = ({
     [availableActions, propertyName]
   );
 
+  const contentTypeKind = pathToData.split('..')[0] as 'collectionTypes' | 'singleTypes';
+  const localeValidationErrorLabels = React.useMemo(() => {
+    if (propertyName !== 'locales' || subject === undefined) return [];
+    const errorKeys = getLocaleValidationErrorActionKeys(modifiedData, contentTypeKind, subject);
+    return propertyActions
+      .filter(
+        ({ actionId, isActionRelatedToCurrentProperty }) =>
+          isActionRelatedToCurrentProperty && errorKeys.includes(actionId)
+      )
+      .map(({ label }) => label);
+  }, [propertyName, subject, modifiedData, contentTypeKind, propertyActions]);
+
   return (
-    <Flex display="inline-flex" direction="column" minWidth={0}>
+    <Flex display="inline-flex" direction="column" alignItems="stretch" minWidth={0}>
       <Header label={label} headers={propertyActions} />
+      {localeValidationErrorLabels.length > 0 && (
+        <Box paddingLeft={6} paddingTop={2} paddingBottom={2}>
+          <Typography role="alert" variant="pi" textColor="danger600">
+            {formatMessage(
+              {
+                id: 'Settings.roles.form.permissions.locales.validation',
+                defaultMessage:
+                  '{count, plural, one {The {actions} action must apply to at least one locale.} other {The {actions} actions must apply to at least one locale.}}',
+              },
+              {
+                count: localeValidationErrorLabels.length,
+                actions: formatList(localeValidationErrorLabels, { type: 'conjunction' }),
+              }
+            )}
+          </Typography>
+        </Box>
+      )}
       <Box>
         {childrenForm.map(({ children: childrenForm, label, value, required }, i) => (
           <ActionRow
@@ -75,6 +121,7 @@ const CollapsePropertyMatrix = ({
             pathToData={pathToData}
             propertyName={propertyName}
             isOdd={i % 2 === 0}
+            subject={subject}
           />
         ))}
       </Box>
@@ -86,11 +133,10 @@ const CollapsePropertyMatrix = ({
  * ActionRow
  * -----------------------------------------------------------------------------------------------*/
 
-interface ActionRowProps
-  extends Pick<
-    SubActionRowProps,
-    'childrenForm' | 'isFormDisabled' | 'propertyActions' | 'propertyName'
-  > {
+interface ActionRowProps extends Pick<
+  SubActionRowProps,
+  'childrenForm' | 'isFormDisabled' | 'propertyActions' | 'propertyName' | 'subject'
+> {
   label: string;
   name: string;
   required?: boolean;
@@ -99,7 +145,7 @@ interface ActionRowProps
 }
 
 const ActionRow = ({
-  childrenForm = [],
+  childrenForm = EMPTY_ACTION_ROW_CHILDREN_FORM,
   label,
   isFormDisabled = false,
   name,
@@ -108,6 +154,7 @@ const ActionRow = ({
   propertyActions,
   propertyName,
   isOdd = false,
+  subject,
 }: ActionRowProps) => {
   const { formatMessage } = useIntl();
   const [rowToOpen, setRowToOpen] = React.useState<string | null>(null);
@@ -116,11 +163,13 @@ const ActionRow = ({
     onChangeCollectionTypeLeftActionRowCheckbox,
     onChangeParentCheckbox,
     onChangeSimpleCheckbox,
+    checkUserHasPermission,
+    checkUserHasGroupPermission,
   } = usePermissionsDataManager();
 
   const isActive = rowToOpen === name;
 
-  const recursiveChildren = useMemo(() => {
+  const recursiveChildren = React.useMemo(() => {
     if (!Array.isArray(childrenForm)) {
       return [];
     }
@@ -148,7 +197,7 @@ const ActionRow = ({
     onChangeCollectionTypeLeftActionRowCheckbox(pathToData, propertyName, name, value);
   };
 
-  const { hasAllActionsSelected, hasSomeActionsSelected } = useMemo(() => {
+  const { hasAllActionsSelected, hasSomeActionsSelected } = React.useMemo(() => {
     return getRowLabelCheckboxState(propertyActions, modifiedData, pathToData, propertyName, name);
   }, [propertyActions, modifiedData, pathToData, propertyName, name]);
 
@@ -156,8 +205,8 @@ const ActionRow = ({
     <>
       <Wrapper
         alignItems="center"
-        isCollapsable={isCollapsable}
-        isActive={isActive}
+        $isCollapsable={isCollapsable}
+        $isActive={isActive}
         background={isOdd ? 'neutral100' : 'neutral0'}
       >
         <Flex>
@@ -190,6 +239,12 @@ const ActionRow = ({
 
               if (!isCollapsable) {
                 const checkboxValue = get(modifiedData, checkboxName, false);
+                const userHasPermission = checkUserHasPermission(
+                  actionId,
+                  subject,
+                  name,
+                  propertyName
+                );
 
                 return (
                   <Flex
@@ -199,27 +254,31 @@ const ActionRow = ({
                     justifyContent="center"
                     alignItems="center"
                   >
-                    <BaseCheckbox
-                      disabled={isFormDisabled}
-                      name={checkboxName.join('..')}
-                      aria-label={formatMessage(
-                        {
-                          id: `Settings.permissions.select-by-permission`,
-                          defaultMessage: 'Select {label} permission',
-                        },
-                        { label: `${name} ${label}` }
-                      )}
-                      // Keep same signature as packages/core/admin/admin/src/components/Roles/Permissions/index.js l.91
-                      onValueChange={(value) => {
-                        onChangeSimpleCheckbox({
-                          target: {
-                            name: checkboxName.join('..'),
-                            value,
+                    <UnheldPermissionTooltip
+                      isFormDisabled={isFormDisabled}
+                      userHasPermission={userHasPermission}
+                    >
+                      <Checkbox
+                        disabled={isFormDisabled || !userHasPermission}
+                        name={checkboxName.join('..')}
+                        aria-label={formatMessage(
+                          {
+                            id: `Settings.permissions.select-by-permission`,
+                            defaultMessage: 'Select {label} permission',
                           },
-                        });
-                      }}
-                      value={checkboxValue}
-                    />
+                          { label: `${name} ${label}` }
+                        )}
+                        onCheckedChange={(value) => {
+                          onChangeSimpleCheckbox({
+                            target: {
+                              name: checkboxName.join('..'),
+                              value: !!value,
+                            },
+                          });
+                        }}
+                        checked={checkboxValue}
+                      />
+                    </UnheldPermissionTooltip>
                   </Flex>
                 );
               }
@@ -227,6 +286,12 @@ const ActionRow = ({
               const data = get(modifiedData, checkboxName, {});
 
               const { hasAllActionsSelected, hasSomeActionsSelected } = getCheckboxState(data);
+              const userHasPermission = checkUserHasGroupPermission(
+                actionId,
+                subject,
+                name,
+                propertyName
+              );
 
               return (
                 <Flex
@@ -236,28 +301,31 @@ const ActionRow = ({
                   justifyContent="center"
                   alignItems="center"
                 >
-                  <BaseCheckbox
-                    disabled={isFormDisabled}
-                    name={checkboxName.join('..')}
-                    // Keep same signature as packages/core/admin/admin/src/components/Roles/Permissions/index.js l.91
-                    onValueChange={(value) => {
-                      onChangeParentCheckbox({
-                        target: {
-                          name: checkboxName.join('..'),
-                          value,
+                  <UnheldPermissionTooltip
+                    isFormDisabled={isFormDisabled}
+                    userHasPermission={userHasPermission}
+                  >
+                    <Checkbox
+                      disabled={isFormDisabled || !userHasPermission}
+                      name={checkboxName.join('..')}
+                      onCheckedChange={(value) => {
+                        onChangeParentCheckbox({
+                          target: {
+                            name: checkboxName.join('..'),
+                            value: !!value,
+                          },
+                        });
+                      }}
+                      aria-label={formatMessage(
+                        {
+                          id: `Settings.permissions.select-by-permission`,
+                          defaultMessage: 'Select {label} permission',
                         },
-                      });
-                    }}
-                    aria-label={formatMessage(
-                      {
-                        id: `Settings.permissions.select-by-permission`,
-                        defaultMessage: 'Select {label} permission',
-                      },
-                      { label: `${name} ${label}` }
-                    )}
-                    value={hasAllActionsSelected}
-                    indeterminate={hasSomeActionsSelected}
-                  />
+                        { label: `${name} ${label}` }
+                      )}
+                      checked={hasSomeActionsSelected ? 'indeterminate' : hasAllActionsSelected}
+                    />
+                  </UnheldPermissionTooltip>
                 </Flex>
               );
             })}
@@ -273,6 +341,7 @@ const ActionRow = ({
           propertyName={propertyName}
           propertyActions={propertyActions}
           recursiveLevel={0}
+          subject={subject}
         />
       )}
     </>
@@ -313,27 +382,35 @@ const getRowLabelCheckboxState = (
   return getCheckboxState(data);
 };
 
-const Wrapper = styled(Flex)<{ isCollapsable?: boolean; isActive?: boolean }>`
+const Wrapper = styled<FlexComponent>(Flex)<{ $isCollapsable?: boolean; $isActive?: boolean }>`
   height: ${rowHeight};
   flex: 1;
 
-  ${({ isCollapsable, theme }) =>
-    isCollapsable &&
+  &:hover {
+    ${({ $isCollapsable, theme }) => $isCollapsable && activeStyle(theme)}
+  }
+
+  ${({ $isCollapsable }) =>
+    $isCollapsable &&
     `
       ${CarretIcon} {
-        display: block;
-        color: ${theme.colors.neutral100};
-      }
-      &:hover {
-        ${activeStyle(theme)}
+        display: flex;
       }
   `}
-  ${({ isActive, theme }) => isActive && activeStyle(theme)};
+  ${({ $isActive, theme }) => $isActive && activeStyle(theme)};
 `;
 
-const CarretIcon = styled(CarretDown)<{ $isActive: boolean }>`
+const CarretIcon = styled(CaretDown)<{ $isActive: boolean }>`
   display: none;
-  width: ${10 / 16}rem;
+
+  svg {
+    width: 1.4rem;
+  }
+
+  path {
+    fill: ${({ theme }) => theme.colors.neutral200};
+  }
+
   transform: rotate(${({ $isActive }) => ($isActive ? '180' : '0')}deg);
   margin-left: ${({ theme }) => theme.spaces[2]};
 `;
@@ -349,21 +426,28 @@ interface SubActionRowProps {
   pathToDataFromActionRow: string;
   propertyActions: PropertyAction[];
   propertyName: string;
+  subject?: string;
   recursiveLevel: number;
 }
 
 const SubActionRow = ({
-  childrenForm = [],
+  childrenForm = EMPTY_SUB_ACTION_ROW_CHILDREN_FORM,
   isFormDisabled,
   recursiveLevel,
   pathToDataFromActionRow,
   propertyActions,
   parentName,
   propertyName,
+  subject,
 }: SubActionRowProps) => {
   const { formatMessage } = useIntl();
-  const { modifiedData, onChangeParentCheckbox, onChangeSimpleCheckbox } =
-    usePermissionsDataManager();
+  const {
+    modifiedData,
+    onChangeParentCheckbox,
+    onChangeSimpleCheckbox,
+    checkUserHasPermission,
+    checkUserHasGroupPermission,
+  } = usePermissionsDataManager();
   const [rowToOpen, setRowToOpen] = React.useState<string | null>(null);
 
   const handleClickToggleSubLevel = (name: string) => {
@@ -376,7 +460,7 @@ const SubActionRow = ({
     });
   };
 
-  const displayedRecursiveChildren = useMemo(() => {
+  const displayedRecursiveChildren = React.useMemo(() => {
     if (!rowToOpen) {
       return null;
     }
@@ -385,7 +469,7 @@ const SubActionRow = ({
   }, [rowToOpen, childrenForm]);
 
   return (
-    <Box paddingLeft={`2rem`}>
+    <Box paddingLeft={`3.2rem`}>
       <TopTimeline />
       {childrenForm.map(({ label, value, required, children: subChildrenForm }, index) => {
         const isVisible = index + 1 < childrenForm.length;
@@ -393,7 +477,7 @@ const SubActionRow = ({
         const isActive = rowToOpen === value;
 
         return (
-          <LeftBorderTimeline key={value} isVisible={isVisible}>
+          <LeftBorderTimeline key={value} $isVisible={isVisible}>
             <Flex height={rowHeight}>
               <StyledBox>
                 <Svg
@@ -402,7 +486,7 @@ const SubActionRow = ({
                   viewBox="0 0 20 23"
                   fill="none"
                   xmlns="http://www.w3.org/2000/svg"
-                  color="primary200"
+                  $color="primary200"
                 >
                   <path
                     fillRule="evenodd"
@@ -413,21 +497,21 @@ const SubActionRow = ({
                 </Svg>
               </StyledBox>
               <Flex style={{ flex: 1 }}>
-                <RowStyle level={recursiveLevel} isActive={isActive} isCollapsable={isArrayType}>
+                <RowStyle $level={recursiveLevel} $isActive={isActive} $isCollapsable={isArrayType}>
                   <CollapseLabel
                     alignItems="center"
-                    isCollapsable={isArrayType}
+                    $isCollapsable={isArrayType}
                     {...(isArrayType && {
                       onClick: () => handleClickToggleSubLevel(value),
                       'aria-expanded': isActive,
-                      onKeyDown: ({ key }) =>
+                      onKeyDown: ({ key }: React.KeyboardEvent<HTMLDivElement>) =>
                         (key === 'Enter' || key === ' ') && handleClickToggleSubLevel(value),
                       tabIndex: 0,
                       role: 'button',
                     })}
                     title={label}
                   >
-                    <Typography ellipsis>{capitalise(label)}</Typography>
+                    <RowLabel ellipsis>{label}</RowLabel>
                     {required && <RequiredSign />}
                     <CarretIcon $isActive={isActive} />
                   </CollapseLabel>
@@ -452,8 +536,18 @@ const SubActionRow = ({
                       ];
 
                       const checkboxValue = get(modifiedData, checkboxName, false);
+                      // `parentName` uses the '..' form-path separator; permission checks take a
+                      // dot-separated field path (e.g. `seo.meta.robots`).
+                      const fieldPath = [...parentName.split('..'), value].join('.');
 
                       if (!subChildrenForm) {
+                        const userHasPermission = checkUserHasPermission(
+                          actionId,
+                          subject,
+                          fieldPath,
+                          propertyName
+                        );
+
                         return (
                           <Flex
                             key={propertyLabel}
@@ -462,33 +556,43 @@ const SubActionRow = ({
                             justifyContent="center"
                             alignItems="center"
                           >
-                            <BaseCheckbox
-                              disabled={isFormDisabled}
-                              name={checkboxName.join('..')}
-                              aria-label={formatMessage(
-                                {
-                                  id: `Settings.permissions.select-by-permission`,
-                                  defaultMessage: 'Select {label} permission',
-                                },
-                                { label: `${parentName} ${label} ${propertyLabel}` }
-                              )}
-                              // Keep same signature as packages/core/admin/admin/src/components/Roles/Permissions/index.js l.91
-                              onValueChange={(value) => {
-                                onChangeSimpleCheckbox({
-                                  target: {
-                                    name: checkboxName.join('..'),
-                                    value,
+                            <UnheldPermissionTooltip
+                              isFormDisabled={isFormDisabled}
+                              userHasPermission={userHasPermission}
+                            >
+                              <Checkbox
+                                disabled={isFormDisabled || !userHasPermission}
+                                name={checkboxName.join('..')}
+                                aria-label={formatMessage(
+                                  {
+                                    id: `Settings.permissions.select-by-permission`,
+                                    defaultMessage: 'Select {label} permission',
                                   },
-                                });
-                              }}
-                              value={checkboxValue}
-                            />
+                                  { label: `${parentName} ${label} ${propertyLabel}` }
+                                )}
+                                onCheckedChange={(value) => {
+                                  onChangeSimpleCheckbox({
+                                    target: {
+                                      name: checkboxName.join('..'),
+                                      value: !!value,
+                                    },
+                                  });
+                                }}
+                                checked={checkboxValue}
+                              />
+                            </UnheldPermissionTooltip>
                           </Flex>
                         );
                       }
 
                       const { hasAllActionsSelected, hasSomeActionsSelected } =
                         getCheckboxState(checkboxValue);
+                      const userHasPermission = checkUserHasGroupPermission(
+                        actionId,
+                        subject,
+                        fieldPath,
+                        propertyName
+                      );
 
                       return (
                         <Flex
@@ -498,29 +602,35 @@ const SubActionRow = ({
                           justifyContent="center"
                           alignItems="center"
                         >
-                          <BaseCheckbox
-                            key={propertyLabel}
-                            disabled={isFormDisabled}
-                            name={checkboxName.join('..')}
-                            aria-label={formatMessage(
-                              {
-                                id: `Settings.permissions.select-by-permission`,
-                                defaultMessage: 'Select {label} permission',
-                              },
-                              { label: `${parentName} ${label} ${propertyLabel}` }
-                            )}
-                            // Keep same signature as packages/core/admin/admin/src/components/Roles/Permissions/index.js l.91
-                            onValueChange={(value) => {
-                              onChangeParentCheckbox({
-                                target: {
-                                  name: checkboxName.join('..'),
-                                  value,
+                          <UnheldPermissionTooltip
+                            isFormDisabled={isFormDisabled}
+                            userHasPermission={userHasPermission}
+                          >
+                            <Checkbox
+                              key={propertyLabel}
+                              disabled={isFormDisabled || !userHasPermission}
+                              name={checkboxName.join('..')}
+                              aria-label={formatMessage(
+                                {
+                                  id: `Settings.permissions.select-by-permission`,
+                                  defaultMessage: 'Select {label} permission',
                                 },
-                              });
-                            }}
-                            value={hasAllActionsSelected}
-                            indeterminate={hasSomeActionsSelected}
-                          />
+                                { label: `${parentName} ${label} ${propertyLabel}` }
+                              )}
+                              // Keep same signature as packages/core/admin/admin/src/components/Roles/Permissions/index.js l.91
+                              onCheckedChange={(value) => {
+                                onChangeParentCheckbox({
+                                  target: {
+                                    name: checkboxName.join('..'),
+                                    value: !!value,
+                                  },
+                                });
+                              }}
+                              checked={
+                                hasSomeActionsSelected ? 'indeterminate' : hasAllActionsSelected
+                              }
+                            />
+                          </UnheldPermissionTooltip>
                         </Flex>
                       );
                     }
@@ -538,6 +648,7 @@ const SubActionRow = ({
                   propertyName={propertyName}
                   recursiveLevel={recursiveLevel + 1}
                   childrenForm={displayedRecursiveChildren.children}
+                  subject={subject}
                 />
               </Box>
             )}
@@ -548,57 +659,63 @@ const SubActionRow = ({
   );
 };
 
-const LeftBorderTimeline = styled(Box)<{ isVisible?: boolean }>`
-  border-left: ${({ isVisible, theme }) =>
-    isVisible ? `4px solid ${theme.colors.primary200}` : '4px solid transparent'};
+const LeftBorderTimeline = styled<BoxComponent>(Box)<{ $isVisible?: boolean }>`
+  border-left: ${({ $isVisible, theme }) =>
+    $isVisible ? `4px solid ${theme.colors.primary200}` : '4px solid transparent'};
 `;
 
-const RowStyle = styled(Flex)<{ level: number; isCollapsable?: boolean; isActive?: boolean }>`
+const RowStyle = styled<FlexComponent>(Flex)<{
+  $level: number;
+  $isCollapsable?: boolean;
+  $isActive?: boolean;
+}>`
   padding-left: ${({ theme }) => theme.spaces[4]};
-  width: ${({ level }) => 145 - level * 36}px;
+  width: ${({ $level }) => 145 - $level * 36}px;
 
-  ${({ isCollapsable, theme }) =>
-    isCollapsable &&
+  &:hover {
+    ${({ $isCollapsable, theme }) => $isCollapsable && activeStyle(theme)}
+  }
+
+  ${({ $isCollapsable }) =>
+    $isCollapsable &&
     `
       ${CarretIcon} {
-        display: block;
-        color: ${theme.colors.neutral100};
-      }
-      &:hover {
-        ${activeStyle(theme)}
+        display: flex;
       }
   `}
-  ${({ isActive, theme }) => isActive && activeStyle(theme)};
+  ${({ $isActive, theme }) => $isActive && activeStyle(theme)};
 `;
+
+const RowLabel = styled<TypographyComponent>(Typography)``;
 
 const TopTimeline = styled.div`
   padding-top: ${({ theme }) => theme.spaces[2]};
   margin-top: ${({ theme }) => theme.spaces[2]};
-  width: ${4 / 16}rem;
+  width: 0.4rem;
   background-color: ${({ theme }) => theme.colors.primary200};
   border-top-left-radius: 2px;
   border-top-right-radius: 2px;
 `;
 
-const StyledBox = styled(Box)`
+const StyledBox = styled<BoxComponent>(Box)`
   transform: translate(-4px, -12px);
 
   &:before {
     content: '';
-    width: ${4 / 16}rem;
-    height: ${12 / 16}rem;
+    width: 0.4rem;
+    height: 1.2rem;
     background: ${({ theme }) => theme.colors.primary200};
     display: block;
   }
 `;
 
-const Svg = styled.svg<{ color: keyof DefaultTheme['colors'] }>`
+const Svg = styled.svg<{ $color: keyof DefaultTheme['colors'] }>`
   position: relative;
   flex-shrink: 0;
   transform: translate(-0.5px, -1px);
 
   * {
-    fill: ${({ theme, color }) => theme.colors[color]};
+    fill: ${({ theme, $color }) => theme.colors[$color]};
   }
 `;
 
@@ -611,7 +728,7 @@ interface HeaderProps {
   label: string;
 }
 
-const Header = ({ headers = [], label }: HeaderProps) => {
+const Header = ({ headers = EMPTY_HEADERS, label }: HeaderProps) => {
   const { formatMessage } = useIntl();
 
   return (
@@ -647,26 +764,15 @@ const Header = ({ headers = [], label }: HeaderProps) => {
   );
 };
 
-/* -------------------------------------------------------------------------------------------------
- * activeStyle (util)
- * -----------------------------------------------------------------------------------------------*/
-
-/**
- * @internal
- */
 const activeStyle = (theme: DefaultTheme) => css`
-  ${Typography} {
-    color: ${theme.colors.primary600};
-    font-weight: ${theme.fontWeights.bold};
-  }
-  ${CarretIcon} {
-    display: block;
+  color: ${theme.colors.primary600};
+  font-weight: ${theme.fontWeights.bold};
 
+  ${CarretIcon} {
     path {
       fill: ${theme.colors.primary600};
     }
   }
 `;
 
-export { activeStyle as _internalActiveStyle };
 export { CollapsePropertyMatrix };

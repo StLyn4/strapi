@@ -1,5 +1,5 @@
-import { Readable } from 'stream';
-import { isFinite } from 'lodash/fp';
+import { Readable } from 'node:stream';
+
 import type { Knex } from 'knex';
 import type { QueryBuilder } from '../../query-builder';
 import type { Database } from '../../..';
@@ -49,10 +49,10 @@ class ReadableStrapiQuery extends Readable {
     const { offset, limit } = qb.state;
 
     // Original offset value
-    this._offset = isFinite(offset) ? Number(offset) : 0;
+    this._offset = Number.isFinite(offset) ? Number(offset) : 0;
 
     // Max amount of entities to fetch, force null as undefined value
-    this._limit = isFinite(limit) ? Number(limit) : null;
+    this._limit = Number.isFinite(limit) ? Number(limit) : null;
 
     // Total amount of entities fetched
     this._fetched = 0;
@@ -92,7 +92,7 @@ class ReadableStrapiQuery extends Readable {
    * Custom ._read() implementation
    *
    *  NOTE: Here "size" means the number of entities to be read from the database.
-   *  Not the actual byte size, as it would means that we need to return partial entities.
+   *  Not the actual byte size, as it would mean that we need to return partial entities.
    *
    */
   async _read(size: number) {
@@ -147,9 +147,13 @@ class ReadableStrapiQuery extends Readable {
 
       const { populate } = this._qb.state;
 
-      // Apply populate if needed
+      // Applies the populate if needed
       if (populate) {
-        await applyPopulate(results, populate, { qb: this._qb, uid: this._uid, db: this._db });
+        await applyPopulate(results, populate, {
+          qb: this._qb,
+          uid: this._uid,
+          db: this._db,
+        });
       }
 
       // Map results if asked to

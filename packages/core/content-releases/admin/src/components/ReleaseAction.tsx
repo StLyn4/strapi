@@ -1,24 +1,23 @@
 import * as React from 'react';
 
-import { type BulkActionComponent } from '@strapi/admin/strapi-admin';
+import {
+  useAPIErrorHandler,
+  useNotification,
+  useQueryParams,
+  useRBAC,
+  isFetchError,
+  FormikUnsavedChangesRegistrar,
+} from '@strapi/admin/strapi-admin';
+import { unstable_useContentManagerContext as useContentManagerContext } from '@strapi/content-manager/strapi-admin';
 import {
   Box,
   Button,
-  FieldLabel,
   Flex,
   SingleSelect,
   SingleSelectOption,
-  ModalBody,
-  ModalFooter,
+  Modal,
+  Field,
 } from '@strapi/design-system';
-import {
-  useAPIErrorHandler,
-  useCMEditViewDataManager,
-  useNotification,
-  useRBAC,
-} from '@strapi/helper-plugin';
-import { Common } from '@strapi/types';
-import { isAxiosError } from 'axios';
 import { Formik, Form } from 'formik';
 import { useIntl } from 'react-intl';
 
@@ -26,9 +25,16 @@ import { CreateManyReleaseActions } from '../../../shared/contracts/release-acti
 import { PERMISSIONS as releasePermissions } from '../constants';
 import { useCreateManyReleaseActionsMutation, useGetReleasesQuery } from '../services/release';
 
-import { type FormValues, INITIAL_VALUES, RELEASE_ACTION_FORM_SCHEMA } from './CMReleasesContainer';
-import { NoReleases } from './CMReleasesContainer';
+import {
+  type FormValues,
+  INITIAL_VALUES,
+  RELEASE_ACTION_FORM_SCHEMA,
+  NoReleases,
+} from './ReleaseActionModal';
 import { ReleaseActionOptions } from './ReleaseActionOptions';
+
+import type { BulkActionComponent } from '@strapi/content-manager/strapi-admin';
+import type { UID } from '@strapi/types';
 
 const getContentPermissions = (subject: string) => {
   const permissions = {
@@ -47,11 +53,11 @@ const getContentPermissions = (subject: string) => {
   return permissions;
 };
 
-const ReleaseAction: BulkActionComponent = ({ ids, model }) => {
+const ReleaseAction: BulkActionComponent = ({ documents, model }) => {
   const { formatMessage } = useIntl();
-  const toggleNotification = useNotification();
+  const { toggleNotification } = useNotification();
   const { formatAPIError } = useAPIErrorHandler();
-  const { modifiedData } = useCMEditViewDataManager();
+  const [{ query }] = useQueryParams<{ plugins?: { i18n?: { locale?: string } } }>();
   const contentPermissions = getContentPermissions(model);
   const {
     allowedActions: { canPublish },
@@ -59,22 +65,25 @@ const ReleaseAction: BulkActionComponent = ({ ids, model }) => {
   const {
     allowedActions: { canCreate },
   } = useRBAC(releasePermissions);
+  const { hasDraftAndPublish } = useContentManagerContext();
 
   // Get all the releases not published
   const response = useGetReleasesQuery();
   const releases = response.data?.data;
   const [createManyReleaseActions, { isLoading }] = useCreateManyReleaseActionsMutation();
+  const documentIds = documents.map((doc) => doc.documentId);
 
   const handleSubmit = async (values: FormValues) => {
-    const locale = modifiedData.locale as string | undefined;
-    const releaseActionEntries: CreateManyReleaseActions.Request['body'] = ids.map((id) => ({
-      type: values.type,
-      entry: {
-        contentType: model as Common.UID.ContentType,
-        id,
+    const locale = query.plugins?.i18n?.locale;
+
+    const releaseActionEntries: CreateManyReleaseActions.Request['body'] = documentIds.map(
+      (entryDocumentId) => ({
+        type: values.type,
+        contentType: model as UID.ContentType,
+        entryDocumentId,
         locale,
-      },
-    }));
+      })
+    );
 
     const response = await createManyReleaseActions({
       body: releaseActionEntries,
@@ -117,8 +126,8 @@ const ReleaseAction: BulkActionComponent = ({ ids, model }) => {
     }
 
     if ('error' in response) {
-      if (isAxiosError(response.error)) {
-        // Handle axios error
+      if (isFetchError(response.error)) {
+        // Handle fetch error
         toggleNotification({
           type: 'warning',
           message: formatAPIError(response.error),
@@ -133,7 +142,7 @@ const ReleaseAction: BulkActionComponent = ({ ids, model }) => {
     }
   };
 
-  if (!canCreate || !canPublish) return null;
+  if (!hasDraftAndPublish || !canCreate || !canPublish) return null;
 
   return {
     actionType: 'release',
@@ -162,68 +171,69 @@ const ReleaseAction: BulkActionComponent = ({ ids, model }) => {
           >
             {({ values, setFieldValue }) => (
               <Form>
+                <FormikUnsavedChangesRegistrar />
                 {releases?.length === 0 ? (
                   <NoReleases />
                 ) : (
-                  <ModalBody>
+                  <Modal.Body>
                     <Flex direction="column" alignItems="stretch" gap={2}>
                       <Box paddingBottom={6}>
-                        <SingleSelect
-                          required
-                          label={formatMessage({
-                            id: 'content-releases.content-manager-list-view.add-to-release.select-label',
-                            defaultMessage: 'Select a release',
-                          })}
-                          placeholder={formatMessage({
-                            id: 'content-releases.content-manager-list-view.add-to-release.select-placeholder',
-                            defaultMessage: 'Select',
-                          })}
-                          onChange={(value) => setFieldValue('releaseId', value)}
-                          value={values.releaseId}
-                        >
-                          {releases?.map((release) => (
-                            <SingleSelectOption key={release.id} value={release.id}>
-                              {release.name}
-                            </SingleSelectOption>
-                          ))}
-                        </SingleSelect>
+                        <Field.Root required>
+                          <Field.Label>
+                            {formatMessage({
+                              id: 'content-releases.content-manager-list-view.add-to-release.select-label',
+                              defaultMessage: 'Select a release',
+                            })}
+                          </Field.Label>
+                          <SingleSelect
+                            placeholder={formatMessage({
+                              id: 'content-releases.content-manager-list-view.add-to-release.select-placeholder',
+                              defaultMessage: 'Select',
+                            })}
+                            onChange={(value) => setFieldValue('releaseId', value)}
+                            value={values.releaseId}
+                          >
+                            {releases?.map((release) => (
+                              <SingleSelectOption key={release.id} value={release.id}>
+                                {release.name}
+                              </SingleSelectOption>
+                            ))}
+                          </SingleSelect>
+                        </Field.Root>
                       </Box>
-                      <FieldLabel>
+                      <Field.Label>
                         {formatMessage({
                           id: 'content-releases.content-manager-list-view.add-to-release.action-type-label',
                           defaultMessage: 'What do you want to do with these entries?',
                         })}
-                      </FieldLabel>
+                      </Field.Label>
                       <ReleaseActionOptions
                         selected={values.type}
-                        handleChange={(e) => setFieldValue('type', e.target.value)}
+                        onChange={(type) => setFieldValue('type', type)}
                         name="type"
                       />
                     </Flex>
-                  </ModalBody>
+                  </Modal.Body>
                 )}
-                <ModalFooter
-                  startActions={
-                    <Button onClick={onClose} variant="tertiary" name="cancel">
+                <Modal.Footer>
+                  <Modal.Close>
+                    <Button variant="tertiary" name="cancel">
                       {formatMessage({
                         id: 'content-releases.content-manager-list-view.add-to-release.cancel-button',
                         defaultMessage: 'Cancel',
                       })}
                     </Button>
-                  }
-                  endActions={
-                    /**
-                     * TODO: Ideally we would use isValid from Formik to disable the button, however currently it always returns true
-                     * for yup.string().required(), even when the value is falsy (including empty string)
-                     */
-                    <Button type="submit" disabled={!values.releaseId} loading={isLoading}>
-                      {formatMessage({
-                        id: 'content-releases.content-manager-list-view.add-to-release.continue-button',
-                        defaultMessage: 'Continue',
-                      })}
-                    </Button>
-                  }
-                />
+                  </Modal.Close>
+                  {/** * TODO: Ideally we would use isValid from Formik to disable the button,
+                  however currently it always returns true * for yup.string().required(), even when
+                  the value is falsy (including empty string) */}
+                  <Button type="submit" disabled={!values.releaseId} loading={isLoading}>
+                    {formatMessage({
+                      id: 'content-releases.content-manager-list-view.add-to-release.continue-button',
+                      defaultMessage: 'Continue',
+                    })}
+                  </Button>
+                </Modal.Footer>
               </Form>
             )}
           </Formik>

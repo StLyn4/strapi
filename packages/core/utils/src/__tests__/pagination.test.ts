@@ -1,4 +1,8 @@
-import { withDefaultPagination } from '../pagination';
+import {
+  withDefaultPagination,
+  transformPagedPaginationInfo,
+  transformOffsetPaginationInfo,
+} from '../pagination';
 
 const defaultLimit = 20;
 const defaults = {
@@ -7,6 +11,19 @@ const defaults = {
 };
 
 describe('Pagination util', () => {
+  test('Does not change query arguments or defaults across calls', () => {
+    const filters = { title: { $eq: 'example' } };
+    const query = { page: 2, pageSize: 5, filters };
+    const customDefaults = { page: { pageSize: 20 }, offset: { limit: 30 } };
+
+    const result = withDefaultPagination(query, { defaults: customDefaults });
+
+    expect(result).toEqual({ start: 5, limit: 5, filters });
+    expect(query).toEqual({ page: 2, pageSize: 5, filters });
+    expect(customDefaults).toEqual({ page: { pageSize: 20 }, offset: { limit: 30 } });
+    expect(withDefaultPagination({})).toEqual({ start: 0, limit: 10 });
+  });
+
   describe('With maxLimit set', () => {
     const maxLimit = 50;
 
@@ -28,6 +45,41 @@ describe('Pagination util', () => {
         expect(defaultPagination).toEqual({
           start: 0,
           limit: pagination.pageSize,
+        });
+      });
+
+      test('Uses default pageSize when only page is provided', () => {
+        const pagination = { page: 2 };
+        const defaultPagination = withDefaultPagination(pagination, { defaults, maxLimit });
+
+        expect(defaultPagination).toEqual({
+          start: defaultLimit, // (page - 1) * defaultLimit
+          limit: defaultLimit,
+        });
+      });
+
+      test('Uses default pageSize when pageSize is null', () => {
+        const pagination = { page: 2, pageSize: null };
+        const defaultPagination = withDefaultPagination(pagination, { defaults, maxLimit });
+
+        expect(defaultPagination).toEqual({
+          start: defaultLimit,
+          limit: defaultLimit,
+        });
+      });
+
+      test('Uses the capped default pageSize to calculate the page offset', () => {
+        const pagination = { page: 2 };
+        const defaultPagination = withDefaultPagination(pagination, {
+          defaults: {
+            page: { pageSize: 3 },
+          },
+          maxLimit: 2,
+        });
+
+        expect(defaultPagination).toEqual({
+          start: 2,
+          limit: 2,
         });
       });
 
@@ -105,6 +157,17 @@ describe('Pagination util', () => {
 
       test('Uses maxLimit as limit', () => {
         const pagination = { limit: -1 };
+        const defaultPagination = withDefaultPagination(pagination, { defaults, maxLimit });
+
+        expect(defaultPagination).toEqual({
+          start: 0,
+          limit: maxLimit,
+        });
+      });
+
+      test('Uses maxLimit as limit when limit is the query string -1', () => {
+        // Query strings reach this util unparsed, e.g. `?pagination[limit]=-1`
+        const pagination = { limit: '-1' } as unknown as { limit: number };
         const defaultPagination = withDefaultPagination(pagination, { defaults, maxLimit });
 
         expect(defaultPagination).toEqual({
@@ -229,6 +292,17 @@ describe('Pagination util', () => {
         });
       });
 
+      test('Uses -1 as limit when limit is the query string -1', () => {
+        // Query strings reach this util unparsed, e.g. `?pagination[limit]=-1`
+        const pagination = { limit: '-1' } as unknown as { limit: number };
+        const defaultPagination = withDefaultPagination(pagination, { defaults });
+
+        expect(defaultPagination).toEqual({
+          start: 0,
+          limit: -1,
+        });
+      });
+
       test('Uses 1 as limit', () => {
         const pagination = { limit: -2 };
         const defaultPagination = withDefaultPagination(pagination, { defaults });
@@ -238,6 +312,103 @@ describe('Pagination util', () => {
           limit: 1,
         });
       });
+    });
+  });
+});
+
+describe('Paged pagination info util', () => {
+  test('Transforms page and pageSize to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformPagedPaginationInfo({ page: 2, pageSize: 10 }, total);
+
+    expect(paginationInfo).toEqual({
+      page: 2,
+      pageSize: 10,
+      pageCount: 10,
+      total,
+    });
+  });
+
+  test('Transforms page to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformPagedPaginationInfo({ page: 2 }, total);
+
+    expect(paginationInfo).toEqual({
+      page: 2,
+      pageSize: total, // Applies total as pageSize
+      pageCount: 1,
+      total,
+    });
+  });
+
+  test('Transforms start and limit to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformPagedPaginationInfo({ start: 10, limit: 10 }, total);
+
+    expect(paginationInfo).toEqual({
+      page: 2,
+      pageSize: 10,
+      pageCount: 10,
+      total,
+    });
+  });
+
+  test('Transforms start to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformPagedPaginationInfo({ start: 10 }, total);
+
+    expect(paginationInfo).toEqual({
+      page: 1,
+      pageSize: total, // Applies total as pageSize
+      pageCount: 1,
+      total,
+    });
+  });
+});
+
+describe('Offset pagination info util', () => {
+  // Instead of page/pageSize/pageCount, it uses start/limit
+  test('Transforms page and pageSize to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformOffsetPaginationInfo({ page: 2, pageSize: 10 }, total);
+
+    expect(paginationInfo).toEqual({
+      start: 10,
+      limit: 10,
+      total,
+    });
+  });
+
+  test('Transforms page to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformOffsetPaginationInfo({ page: 2 }, total);
+
+    expect(paginationInfo).toEqual({
+      start: 100,
+      limit: total, // Applies total as limit
+      total,
+    });
+  });
+
+  test('Transforms start and limit to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformOffsetPaginationInfo({ start: 10, limit: 10 }, total);
+
+    expect(paginationInfo).toEqual({
+      start: 10,
+      limit: 10,
+      total,
+    });
+  });
+
+  test('Transforms start to pagination info', () => {
+    const total = 100;
+    const paginationInfo = transformOffsetPaginationInfo({ start: 10 }, total);
+
+    expect(paginationInfo).toEqual({
+      start: 10,
+      limit: total, // Applies total as limit
+      total,
     });
   });
 });

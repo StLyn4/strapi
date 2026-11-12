@@ -1,16 +1,15 @@
-import { prop } from 'lodash/fp';
 import { contentTypes as contentTypesUtils } from '@strapi/utils';
-import { LoadedStrapi as Strapi, Schema } from '@strapi/types';
 
+import type { Core, Struct } from '@strapi/types';
 import { getService } from '../utils';
 
-export default ({ strapi }: { strapi: Strapi }) => ({
+export default ({ strapi }: { strapi: Core.Strapi }) => ({
   canConfigureContentType({
     userAbility,
     contentType,
   }: {
     userAbility: any;
-    contentType: Schema.ContentType;
+    contentType: Struct.ContentTypeSchema;
   }) {
     const action = contentTypesUtils.isSingleType(contentType)
       ? 'plugin::content-manager.single-types.configure-view'
@@ -20,12 +19,13 @@ export default ({ strapi }: { strapi: Strapi }) => ({
   },
 
   async registerPermissions() {
-    const displayedContentTypes = getService('content-types').findDisplayedContentTypes();
-    const contentTypesUids = displayedContentTypes.map(prop('uid'));
-
-    const draftAndPublishContentTypesUids = displayedContentTypes
-      .filter(contentTypesUtils.hasDraftAndPublish)
-      .map(prop('uid'));
+    const allContentTypes = getService('content-types').findAllContentTypes();
+    const allContentTypesUids = allContentTypes.map(
+      (contentType: Struct.ContentTypeSchema) => contentType?.uid
+    );
+    const contentTypesUids = allContentTypes
+      .filter(({ isDisplayed }: { isDisplayed: boolean }) => isDisplayed)
+      .map((contentType: Struct.ContentTypeSchema) => contentType?.uid);
 
     const actions = [
       {
@@ -43,7 +43,7 @@ export default ({ strapi }: { strapi: Strapi }) => ({
         displayName: 'Read',
         uid: 'explorer.read',
         pluginName: 'content-manager',
-        subjects: contentTypesUids,
+        subjects: allContentTypesUids,
         options: {
           applyToProperties: ['fields'],
         },
@@ -70,7 +70,7 @@ export default ({ strapi }: { strapi: Strapi }) => ({
         displayName: 'Publish',
         uid: 'explorer.publish',
         pluginName: 'content-manager',
-        subjects: draftAndPublishContentTypesUids,
+        subjects: contentTypesUids,
       },
       {
         section: 'plugins',
@@ -95,6 +95,6 @@ export default ({ strapi }: { strapi: Strapi }) => ({
       },
     ];
 
-    await strapi.admin.services.permission.actionProvider.registerMany(actions);
+    await strapi.service('admin::permission').actionProvider.registerMany(actions);
   },
 });

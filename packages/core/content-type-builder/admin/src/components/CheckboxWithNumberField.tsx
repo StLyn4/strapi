@@ -1,17 +1,17 @@
-import { useState } from 'react';
-
-import { Box, Checkbox, Flex, NumberInput, TextInput } from '@strapi/design-system';
+import { Box, Checkbox, Field, Flex, NumberInput, TextInput } from '@strapi/design-system';
 import { useIntl } from 'react-intl';
 
-import { IntlLabel } from '../types';
+import { parseNumberInputValue } from '../utils/parseNumberInputValue';
+
+import type { FormChangeHandler, IntlLabel } from '../types';
 
 interface CheckboxWithNumberFieldProps {
   error?: string;
   intlLabel: IntlLabel;
-  modifiedData: Record<string, any>;
+  modifiedData: { type?: string };
   name: string;
-  onChange: (value: any) => void;
-  value?: any;
+  onChange: FormChangeHandler<string | number | null>;
+  value?: string | number | null;
 }
 
 export const CheckboxWithNumberField = ({
@@ -23,7 +23,6 @@ export const CheckboxWithNumberField = ({
   value = null,
 }: CheckboxWithNumberFieldProps) => {
   const { formatMessage } = useIntl();
-  const [showInput, setShowInput] = useState(!!value || value === 0);
   const label = intlLabel.id
     ? formatMessage(
         { id: intlLabel.id, defaultMessage: intlLabel.defaultMessage },
@@ -41,42 +40,43 @@ export const CheckboxWithNumberField = ({
       <Checkbox
         id={name}
         name={name}
-        onValueChange={(value: any) => {
+        onCheckedChange={(value) => {
           const initValue = type === 'text' ? '0' : 0;
           const nextValue = value ? initValue : null;
 
           onChange({ target: { name, value: nextValue } });
-          setShowInput((prev) => !prev);
         }}
-        value={showInput}
+        checked={value !== null}
       >
         {label}
       </Checkbox>
-      {showInput && (
+      {value !== null && (
         <Box paddingLeft={6} style={{ maxWidth: '200px' }}>
           {type === 'text' ? (
-            <TextInput
-              label=""
-              aria-label={label}
-              disabled={disabled}
-              error={errorMessage}
-              id={name}
-              name={name}
-              onChange={onChange}
-              value={value === null ? '' : value}
-            />
+            <Field.Root error={errorMessage} name={name}>
+              <TextInput
+                aria-label={label}
+                disabled={disabled}
+                onChange={onChange}
+                value={value === null ? '' : value}
+                type="text"
+              />
+              <Field.Error />
+            </Field.Root>
           ) : (
-            <NumberInput
-              aria-label={label}
-              disabled={disabled}
-              error={errorMessage}
-              id={name}
-              name={name}
-              onValueChange={(value: any) => {
-                onChange({ target: { name, value, type } });
-              }}
-              value={value || 0}
-            />
+            <Field.Root error={errorMessage} name={name}>
+              <NumberInput
+                aria-label={label}
+                disabled={disabled}
+                onValueChange={(value: string | number | undefined) => {
+                  onChange({
+                    target: { name, value: parseNumberInputValue(value), type },
+                  });
+                }}
+                value={parseNumberInputValue(value)}
+              />
+              <Field.Error />
+            </Field.Root>
           )}
         </Box>
       )}

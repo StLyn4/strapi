@@ -1,25 +1,25 @@
+import _, { pick } from 'lodash';
 import type { Context } from 'koa';
 
-import ee from '@strapi/strapi/dist/utils/ee';
-import _ from 'lodash';
-import { pick, isNil } from 'lodash/fp';
 import { errors } from '@strapi/utils';
 import { validateUserCreationInput } from '../validation/user';
 import { validateUserUpdateInput } from '../../../../server/src/validation/user';
+import { normalizeEmail } from '../../../../server/src/utils/normalize-email';
 import { getService } from '../utils';
 import { isSsoLocked } from '../utils/sso-lock';
 
 const { ApplicationError, ForbiddenError } = errors;
 
-const pickUserCreationAttributes = pick(['firstname', 'lastname', 'email', 'roles']);
+const pickUserCreationAttributes = <T extends object>(user: T) =>
+  pick(user, ['firstname', 'lastname', 'email', 'roles']);
 
 const hasAdminSeatsAvaialble = async () => {
   if (!strapi.EE) {
     return true;
   }
 
-  const permittedSeats = ee.seats as any;
-  if (isNil(permittedSeats)) {
+  const permittedSeats = strapi.ee.seats as any;
+  if (permittedSeats == null) {
     return true;
   }
 
@@ -66,14 +66,14 @@ export default {
 
   async update(ctx: Context) {
     const { id } = ctx.params;
-    const { body: input } = ctx.request;
+    const data = normalizeEmail(ctx.request.body);
 
-    await validateUserUpdateInput(input);
+    await validateUserUpdateInput(data);
 
-    if (_.has(input, 'email')) {
+    if (_.has(data, 'email')) {
       const uniqueEmailCheck = await getService('user').exists({
         id: { $ne: id },
-        email: input.email,
+        email: data.email,
       });
 
       if (uniqueEmailCheck) {
@@ -83,11 +83,11 @@ export default {
 
     const user = await getService('user').findOne(id, null);
 
-    if (!(await hasAdminSeatsAvaialble()) && !user.isActive && input.isActive) {
+    if (!(await hasAdminSeatsAvaialble()) && !user.isActive && data.isActive) {
       throw new ForbiddenError('License seat limit reached. You cannot active this user');
     }
 
-    const updatedUser = await getService('user').updateById(id, input);
+    const updatedUser = await getService('user').updateById(id, data);
 
     if (!updatedUser) {
       return ctx.notFound('User does not exist');

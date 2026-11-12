@@ -1,29 +1,30 @@
 import * as React from 'react';
 
-import { LoadingIndicatorPage } from '@strapi/helper-plugin';
-import Cookies from 'js-cookie';
 import { useIntl } from 'react-intl';
-import { useHistory, useRouteMatch } from 'react-router-dom';
+import { useNavigate, useMatch } from 'react-router-dom';
 
-import { useAuth } from '../../../../admin/src/features/Auth';
+import { Page } from '../../../../admin/src/components/PageHelpers';
+import { useTypedDispatch } from '../../../../admin/src/core/store/hooks';
+import { AUTH_COOKIE_NAME, getCookieValue } from '../../../../admin/src/utils/cookies';
+import { establishAdminSession } from '../../../../admin/src/utils/establishAdminSession';
 
 const AuthResponse = () => {
-  const match = useRouteMatch<{ authResponse: string }>('/auth/login/:authResponse');
+  const match = useMatch('/auth/login/:authResponse');
   const { formatMessage } = useIntl();
-  const { push } = useHistory();
+  const navigate = useNavigate();
+  const dispatch = useTypedDispatch();
 
   const redirectToOops = React.useCallback(() => {
-    push(
-      `/auth/oops?info=${encodeURIComponent(
+    navigate({
+      pathname: '/auth/oops',
+      search: `?info=${encodeURIComponent(
         formatMessage({
           id: 'Auth.form.button.login.providers.error',
           defaultMessage: 'We cannot connect you through the selected provider.',
         })
-      )}`
-    );
-  }, [push, formatMessage]);
-
-  const setToken = useAuth('AuthResponse', (state) => state.setToken);
+      )}`,
+    });
+  }, [navigate, formatMessage]);
 
   React.useEffect(() => {
     if (match?.params.authResponse === 'error') {
@@ -31,21 +32,21 @@ const AuthResponse = () => {
     }
 
     if (match?.params.authResponse === 'success') {
-      const jwtToken = Cookies.get('jwtToken');
+      const jwtToken = getCookieValue(AUTH_COOKIE_NAME);
 
       if (jwtToken) {
-        setToken(jwtToken);
+        establishAdminSession(dispatch, {
+          token: jwtToken,
+        });
 
-        Cookies.remove('jwtToken');
-
-        push('/auth/login');
+        navigate('/auth/login');
       } else {
         redirectToOops();
       }
     }
-  }, [match, redirectToOops, setToken, push]);
+  }, [dispatch, match, redirectToOops, navigate]);
 
-  return <LoadingIndicatorPage />;
+  return <Page.Loading />;
 };
 
 export { AuthResponse };

@@ -1,6 +1,25 @@
-import { clone, isObject, isArray, isNil, curry } from 'lodash/fp';
-import type { AnyAttribute, Model, Data } from './types';
+import { clone, isObject } from 'lodash';
+
+import { curry } from './curry';
+import type { Attribute, AnyAttribute, Model, Entry } from './types';
 import { isRelationalAttribute, isMediaAttribute } from './content-types';
+
+/**
+ * Execute promises in parallel but throw errors in array index order.
+ */
+const parallelWithOrderedErrors = async <T>(promises: Promise<T>[]): Promise<T[]> => {
+  const results = await Promise.allSettled(promises);
+
+  // Throw first error in array index order (matches sequential behavior)
+  for (let i = 0; i < results.length; i += 1) {
+    const result = results[i];
+    if (result.status === 'rejected') {
+      throw result.reason;
+    }
+  }
+
+  return results.map((r) => (r as PromiseFulfilledResult<T>).value);
+};
 
 export type VisitorUtils = ReturnType<typeof createVisitorUtils>;
 
@@ -8,9 +27,13 @@ export interface VisitorOptions {
   data: Record<string, unknown>;
   schema: Model;
   key: string;
-  value: Data[keyof Data];
-  attribute: AnyAttribute;
+  value: unknown;
+  attribute?: AnyAttribute;
   path: Path;
+  getModel(uid: string): Model;
+  parent?: Parent;
+  /** Extra root-level keys allowed (e.g. registered input params). Only used when path.attribute === null. */
+  allowedExtraRootKeys?: string[];
 }
 
 export type Visitor = (visitorOptions: VisitorOptions, visitorUtils: VisitorUtils) => void;
@@ -18,54 +41,116 @@ export type Visitor = (visitorOptions: VisitorOptions, visitorUtils: VisitorUtil
 export interface Path {
   raw: string | null;
   attribute: string | null;
+  rawWithIndices?: string | null;
 }
 
 export interface TraverseOptions {
+  schema: Model;
   path?: Path;
+  parent?: Parent;
+  getModel(uid: string): Model;
+  /** Extra root-level keys allowed (e.g. registered input params). Only used when path.attribute === null. */
+  allowedExtraRootKeys?: string[];
+}
+
+export interface Parent {
+  attribute?: Attribute;
+  key: string | null;
+  path: Path;
   schema: Model;
 }
 
-const traverseMorphRelationTarget = async (visitor: Visitor, path: Path, entry: Data) => {
-  const targetSchema = strapi.getModel(entry.__type);
+const traverseEntity = async (
+  visitor: Visitor,
+  options: TraverseOptions,
+  entity: Entry
+): Promise<Entry> => {
+  const {
+    path = { raw: null, attribute: null, rawWithIndices: null },
+    schema,
+    getModel,
+    allowedExtraRootKeys,
+  } = options;
 
-  const traverseOptions = { schema: targetSchema, path };
+  let parent = options.parent;
 
-  return traverseEntity(visitor, traverseOptions, entry);
-};
+  const traverseMorphRelationTarget = async (visitor: Visitor, path: Path, entry: Entry) => {
+    const targetSchema = getModel(entry.__type!);
 
-const traverseRelationTarget =
-  (schema: Model) => async (visitor: Visitor, path: Path, entry: Data) => {
-    const traverseOptions = { schema, path };
+    const traverseOptions: TraverseOptions = {
+      schema: targetSchema,
+      path,
+      getModel,
+      parent,
+      allowedExtraRootKeys,
+    };
 
     return traverseEntity(visitor, traverseOptions, entry);
   };
 
-const traverseMediaTarget = async (visitor: Visitor, path: Path, entry: Data) => {
-  const targetSchemaUID = 'plugin::upload.file';
-  const targetSchema = strapi.getModel(targetSchemaUID);
+  const traverseRelationTarget =
+    (schema: Model) => async (visitor: Visitor, path: Path, entry: Entry) => {
+      const traverseOptions: TraverseOptions = {
+        schema,
+        path,
+        getModel,
+        parent,
+        allowedExtraRootKeys,
+      };
 
-  const traverseOptions = { schema: targetSchema, path };
+      return traverseEntity(visitor, traverseOptions, entry);
+    };
 
-  return traverseEntity(visitor, traverseOptions, entry);
-};
+  const traverseMediaTarget = async (visitor: Visitor, path: Path, entry: Entry) => {
+    const targetSchemaUID = 'plugin::upload.file';
+    const targetSchema = getModel(targetSchemaUID);
 
-const traverseComponent = async (visitor: Visitor, path: Path, schema: Model, entry: Data) => {
-  const traverseOptions = { schema, path };
+    const traverseOptions: TraverseOptions = {
+      schema: targetSchema,
+      path,
+      getModel,
+      parent,
+      allowedExtraRootKeys,
+    };
 
-  return traverseEntity(visitor, traverseOptions, entry);
-};
+    return traverseEntity(visitor, traverseOptions, entry);
+  };
 
-const visitDynamicZoneEntry = async (visitor: Visitor, path: Path, entry: Data) => {
-  const targetSchema = strapi.getModel(entry.__component);
-  const traverseOptions = { schema: targetSchema, path };
+  const traverseComponent = async (visitor: Visitor, path: Path, schema: Model, entry: Entry) => {
+    const traverseOptions: TraverseOptions = {
+      schema,
+      path,
+      getModel,
+      parent,
+      allowedExtraRootKeys,
+    };
 
-  return traverseEntity(visitor, traverseOptions, entry);
-};
-const traverseEntity = async (visitor: Visitor, options: TraverseOptions, entity: Data) => {
-  const { path = { raw: null, attribute: null }, schema } = options;
+    return traverseEntity(visitor, traverseOptions, entry);
+  };
+
+  const visitDynamicZoneEntry = async (visitor: Visitor, path: Path, entry: Entry) => {
+    // A dynamic zone array can contain a `null` entry (for example a relation
+    // created inline inside a dynamic zone component can leave a null item).
+    // Reading `__component` on it crashed traversal; pass nil entries through
+    // untouched, consistent with how `traverseEntity` ends recursion on nil. (#24303)
+    if (entry == null) {
+      return entry;
+    }
+
+    const targetSchema = getModel(entry.__component!);
+    const traverseOptions: TraverseOptions = {
+      schema: targetSchema,
+      path,
+      getModel,
+      parent,
+      allowedExtraRootKeys,
+    };
+
+    return traverseEntity(visitor, traverseOptions, entry);
+  };
 
   // End recursion
-  if (!isObject(entity) || isNil(schema)) {
+  if (!isObject(entity) || schema == null) {
     return entity;
   }
 
@@ -78,19 +163,15 @@ const traverseEntity = async (visitor: Visitor, options: TraverseOptions, entity
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[i];
     // Retrieve the attribute definition associated to the key from the schema
-    const attribute = schema.attributes[key];
-
-    // If the attribute doesn't exist within the schema, ignore it
-    if (isNil(attribute)) {
-      continue;
-    }
+    const attribute = schema.attributes[key] as AnyAttribute | undefined;
 
     const newPath = { ...path };
 
-    newPath.raw = isNil(path.raw) ? key : `${path.raw}.${key}`;
+    newPath.raw = path.raw == null ? key : `${path.raw}.${key}`;
+    newPath.rawWithIndices = path.rawWithIndices == null ? key : `${path.rawWithIndices}.${key}`;
 
-    if (!isNil(attribute)) {
-      newPath.attribute = isNil(path.attribute) ? key : `${path.attribute}.${key}`;
+    if (attribute != null) {
+      newPath.attribute = path.attribute == null ? key : `${path.attribute}.${key}`;
     }
 
     // Visit the current attribute
@@ -101,75 +182,116 @@ const traverseEntity = async (visitor: Visitor, options: TraverseOptions, entity
       value: copy[key],
       attribute,
       path: newPath,
+      getModel,
+      parent,
+      allowedExtraRootKeys,
     };
 
-    await visitor(visitorOptions, visitorUtils);
+    // Awaited only when the visitor actually returns something thenable. Most visitors
+    // finish synchronously for most keys — a scalar is not a relation, so the relation
+    // visitor returns immediately — and `await` on a non-thenable still allocates a
+    // promise and defers the rest of the loop to a microtask. Over every key of every
+    // node of every entity in a page that was the largest single source of promise churn.
+    const visited = visitor(visitorOptions, visitorUtils) as unknown;
+
+    if (visited != null && typeof (visited as PromiseLike<void>).then === 'function') {
+      await visited;
+    }
 
     // Extract the value for the current key (after calling the visitor)
     const value = copy[key];
 
-    // Ignore Nil values
-    if (isNil(value)) {
+    // Ignore Nil values or attributes
+    if (value == null || attribute == null) {
       continue;
     }
 
     if (isRelationalAttribute(attribute)) {
+      parent = { schema, key, attribute, path: newPath };
       const isMorphRelation = attribute.relation.toLowerCase().startsWith('morph');
 
       const method = isMorphRelation
         ? traverseMorphRelationTarget
-        : traverseRelationTarget(strapi.getModel(attribute.target));
+        : traverseRelationTarget(getModel(attribute.target!));
 
-      if (isArray(value)) {
-        const res = new Array(value.length);
-        for (let i = 0; i < value.length; i += 1) {
-          res[i] = await method(visitor, newPath, value[i]);
-        }
-        copy[key] = res;
+      if (Array.isArray(value)) {
+        // Process array items in parallel with ordered error handling
+        copy[key] = await parallelWithOrderedErrors(
+          value.map((item, i) => {
+            const arrayPath = {
+              ...newPath,
+              rawWithIndices:
+                newPath.rawWithIndices == null ? `${i}` : `${newPath.rawWithIndices}.${i}`,
+            };
+            return method(visitor, arrayPath, item);
+          })
+        );
       } else {
-        copy[key] = await method(visitor, newPath, value as Data);
+        copy[key] = await method(visitor, newPath, value as Entry);
       }
 
       continue;
     }
 
     if (isMediaAttribute(attribute)) {
-      // need to update copy
-      if (isArray(value)) {
-        const res = new Array(value.length);
-        for (let i = 0; i < value.length; i += 1) {
-          res[i] = await traverseMediaTarget(visitor, newPath, value[i]);
-        }
-        copy[key] = res;
+      parent = { schema, key, attribute, path: newPath };
+
+      if (Array.isArray(value)) {
+        // Process media array items in parallel with ordered error handling
+        copy[key] = await parallelWithOrderedErrors(
+          value.map((item, i) => {
+            const arrayPath = {
+              ...newPath,
+              rawWithIndices:
+                newPath.rawWithIndices == null ? `${i}` : `${newPath.rawWithIndices}.${i}`,
+            };
+            return traverseMediaTarget(visitor, arrayPath, item);
+          })
+        );
       } else {
-        copy[key] = await traverseMediaTarget(visitor, newPath, value as Data);
+        copy[key] = await traverseMediaTarget(visitor, newPath, value as Entry);
       }
 
       continue;
     }
 
     if (attribute.type === 'component') {
-      const targetSchema = strapi.getModel(attribute.component);
+      parent = { schema, key, attribute, path: newPath };
+      const targetSchema = getModel(attribute.component);
 
-      if (isArray(value)) {
-        const res: Data[] = new Array(value.length);
-        for (let i = 0; i < value.length; i += 1) {
-          res[i] = await traverseComponent(visitor, newPath, targetSchema, value[i]);
-        }
-        copy[key] = res;
+      if (Array.isArray(value)) {
+        // Process component array items in parallel with ordered error handling
+        copy[key] = await parallelWithOrderedErrors(
+          value.map((item, i) => {
+            const arrayPath = {
+              ...newPath,
+              rawWithIndices:
+                newPath.rawWithIndices == null ? `${i}` : `${newPath.rawWithIndices}.${i}`,
+            };
+            return traverseComponent(visitor, arrayPath, targetSchema, item);
+          })
+        );
       } else {
-        copy[key] = await traverseComponent(visitor, newPath, targetSchema, value as Data);
+        copy[key] = await traverseComponent(visitor, newPath, targetSchema, value as Entry);
       }
 
       continue;
     }
 
-    if (attribute.type === 'dynamiczone' && isArray(value)) {
-      const res = new Array(value.length);
-      for (let i = 0; i < value.length; i += 1) {
-        res[i] = await visitDynamicZoneEntry(visitor, newPath, value[i]);
-      }
-      copy[key] = res;
+    if (attribute.type === 'dynamiczone' && Array.isArray(value)) {
+      parent = { schema, key, attribute, path: newPath };
+
+      // Process dynamic zone items in parallel with ordered error handling
+      copy[key] = await parallelWithOrderedErrors(
+        value.map((item, i) => {
+          const arrayPath = {
+            ...newPath,
+            rawWithIndices:
+              newPath.rawWithIndices == null ? `${i}` : `${newPath.rawWithIndices}.${i}`,
+          };
+          return visitDynamicZoneEntry(visitor, arrayPath, item);
+        })
+      );
 
       continue;
     }
@@ -178,12 +300,12 @@ const traverseEntity = async (visitor: Visitor, options: TraverseOptions, entity
   return copy;
 };
 
-const createVisitorUtils = ({ data }: { data: Data }) => ({
+const createVisitorUtils = ({ data }: { data: Record<string, unknown> }) => ({
   remove(key: string) {
     delete data[key];
   },
 
-  set(key: string, value: Data) {
+  set(key: string, value: unknown) {
     data[key] = value;
   },
 });

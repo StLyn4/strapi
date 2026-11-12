@@ -1,13 +1,18 @@
+import { pick } from 'lodash';
 import type { Context, Next } from 'koa';
 
-import { pick } from 'lodash/fp';
 import compose from 'koa-compose';
-import { errors } from '@strapi/utils';
+import { emitAudit, errors } from '@strapi/utils';
 import { validateProviderOptionsUpdate } from '../validation/authentication';
 import { middlewares, utils } from './authentication-utils';
+import {
+  AUDITED_EVENTS,
+  getSsoSettingsChanges,
+} from '../../../../server/src/audit-logs/sso-settings';
 
-const toProviderDTO = pick(['uid', 'displayName', 'icon']);
-const toProviderLoginOptionsDTO = pick(['autoRegister', 'defaultRole', 'ssoLockedRoles']);
+const toProviderDTO = (provider: object) => pick(provider, ['uid', 'displayName', 'icon']);
+const toProviderLoginOptionsDTO = (options: object) =>
+  pick(options, ['autoRegister', 'defaultRole', 'ssoLockedRoles']);
 
 const { ValidationError } = errors;
 
@@ -18,7 +23,7 @@ const providerAuthenticationFlow = compose([
 
 export default {
   async getProviders(ctx: Context) {
-    const { providerRegistry } = strapi.admin.services.passport;
+    const { providerRegistry } = strapi.service('admin::passport');
 
     ctx.body = providerRegistry.getAll().map(toProviderDTO);
   },
@@ -44,6 +49,12 @@ export default {
     const newAuthOptions = { ...currentAuthOptions, providers: body };
     await adminStore.set({ key: 'auth', value: newAuthOptions });
 
+    const changes = getSsoSettingsChanges(currentAuthOptions.providers, newAuthOptions.providers);
+
+    if (Object.keys(changes).length > 0) {
+      await emitAudit({ strapi }, AUDITED_EVENTS.SSO_SETTINGS_UPDATE, { changes });
+    }
+
     strapi.telemetry.send('didUpdateSSOSettings');
 
     ctx.body = {
@@ -56,7 +67,7 @@ export default {
       params: { provider: providerName },
     } = ctx;
 
-    const { providerRegistry } = strapi.admin.services.passport;
+    const { providerRegistry } = strapi.service('admin::passport');
 
     if (!providerRegistry.has(providerName)) {
       throw new ValidationError(`Invalid provider supplied: ${providerName}`);

@@ -1,255 +1,215 @@
 import * as React from 'react';
 
-import { Box, Divider, Flex, FocusTrap, Icon, Typography } from '@strapi/design-system';
-import {
-  MainNav,
-  NavBrand,
-  NavCondense,
-  NavFooter,
-  NavLink,
-  NavSection,
-  NavSections,
-  NavUser,
-} from '@strapi/design-system/v2';
-import { useAppInfo, usePersistentState, useTracking } from '@strapi/helper-plugin';
-import { Exit, Write, Lock } from '@strapi/icons';
+import { Box, Divider, Flex, FlexComponent, IconButton, useCollator } from '@strapi/design-system';
+import { Cross, List } from '@strapi/icons';
 import { useIntl } from 'react-intl';
-import { NavLink as RouterNavLink, useLocation } from 'react-router-dom';
-import styled from 'styled-components';
+import { useLocation } from 'react-router-dom';
+import { styled } from 'styled-components';
 
-import { useAuth } from '../features/Auth';
-import { useConfiguration } from '../features/Configuration';
-import { Menu } from '../hooks/useMenu';
+import { useTracking } from '../features/Tracking';
+import { useIsDesktop } from '../hooks/useMediaQuery';
+import { Menu, MenuItem, MobileMenuItem } from '../hooks/useMenu';
 
-const LinkUserWrapper = styled(Box)`
-  width: ${150 / 16}rem;
-  position: absolute;
-  bottom: ${({ theme }) => theme.spaces[9]};
-  left: ${({ theme }) => theme.spaces[5]};
-`;
+import { MainNav } from './MainNav/MainNav';
+import { MainNavIcons } from './MainNav/MainNavLinks';
+import { NavBrand } from './MainNav/NavBrand';
+import { NavBurgerMenu } from './MainNav/NavBurgerMenu';
+import { NavUser } from './MainNav/NavUser';
+import { TrialCountdown } from './MainNav/TrialCountdown';
 
-const LinkUser = styled(RouterNavLink)<{ logout?: boolean }>`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  text-decoration: none;
-  padding: ${({ theme }) => `${theme.spaces[2]} ${theme.spaces[4]}`};
-  border-radius: ${({ theme }) => theme.spaces[1]};
+const EMPTY_GENERAL_SECTION_LINKS: NonNullable<LeftMenuProps['generalSectionLinks']> = [];
+const EMPTY_PLUGINS_SECTION_LINKS: NonNullable<LeftMenuProps['pluginsSectionLinks']> = [];
+const EMPTY_TOP_MOBILE_NAVIGATION: NonNullable<LeftMenuProps['topMobileNavigation']> = [];
+const EMPTY_BURGER_MOBILE_NAVIGATION: NonNullable<LeftMenuProps['burgerMobileNavigation']> = [];
 
-  &:hover {
-    background: ${({ theme, logout }) =>
-      logout ? theme.colors.danger100 : theme.colors.primary100};
-    text-decoration: none;
-  }
+const sortLinks = (links: MenuItem[]) => {
+  return links.sort((a, b) => {
+    // if no position is defined, we put the link in the position of the external plugins, before the plugins list
+    const positionA = a.position ?? 6;
+    const positionB = b.position ?? 6;
 
-  svg {
-    path {
-      fill: ${({ theme }) => theme.colors.danger600};
+    if (positionA < positionB) {
+      return -1;
+    } else {
+      return 1;
     }
+  });
+};
+
+const NavListWrapper = styled<FlexComponent<'ul'>>(Flex)`
+  width: 100%;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+
+  &::-webkit-scrollbar {
+    display: none;
   }
 `;
 
-const NavLinkWrapper = styled(Box)`
-  div:nth-child(2) {
-    /* remove badge background color */
-    background: transparent;
+interface LeftMenuProps extends Pick<
+  Menu,
+  'generalSectionLinks' | 'pluginsSectionLinks' | 'topMobileNavigation' | 'burgerMobileNavigation'
+> {}
+
+const MenuDetails = styled(Flex)`
+  flex: 1;
+  flex-direction: row;
+  justify-content: space-between;
+  overflow-x: auto;
+
+  ${({ theme }) => theme.breakpoints.large} {
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 `;
 
-interface LeftMenuProps extends Pick<Menu, 'generalSectionLinks' | 'pluginsSectionLinks'> {}
-
-const LeftMenu = ({ generalSectionLinks, pluginsSectionLinks }: LeftMenuProps) => {
-  const navUserRef = React.useRef<HTMLDivElement>(null!);
-  const [userLinksVisible, setUserLinksVisible] = React.useState(false);
-  const {
-    logos: { menu },
-  } = useConfiguration('LeftMenu');
-  const [condensed, setCondensed] = usePersistentState('navbar-condensed', false);
-  const { userDisplayName } = useAppInfo();
-  const { formatMessage } = useIntl();
+const LeftMenu = ({
+  generalSectionLinks = EMPTY_GENERAL_SECTION_LINKS,
+  pluginsSectionLinks = EMPTY_PLUGINS_SECTION_LINKS,
+  topMobileNavigation = EMPTY_TOP_MOBILE_NAVIGATION,
+  burgerMobileNavigation = EMPTY_BURGER_MOBILE_NAVIGATION,
+}: LeftMenuProps) => {
+  const [isBurgerMenuShown, setIsBurgerMenuShown] = React.useState(false);
   const { trackUsage } = useTracking();
   const { pathname } = useLocation();
-  const logout = useAuth('Logout', (state) => state.logout);
-
-  const initials = userDisplayName
-    .split(' ')
-    .map((name) => name.substring(0, 1))
-    .join('')
-    .substring(0, 2);
-
-  const handleToggleUserLinks = () => setUserLinksVisible((prev) => !prev);
-
-  const handleBlur: React.FocusEventHandler = (e) => {
-    if (
-      !e.currentTarget.contains(e.relatedTarget) &&
-      /**
-       * TODO: can we replace this by just using the navUserRef?
-       */
-      e.relatedTarget?.parentElement?.id !== 'main-nav-user-button'
-    ) {
-      setUserLinksVisible(false);
-    }
-  };
+  const { formatMessage, locale } = useIntl();
+  const formatter = useCollator(locale, {
+    sensitivity: 'base',
+  });
+  const isDesktop = useIsDesktop();
 
   const handleClickOnLink = (destination: string) => {
     trackUsage('willNavigate', { from: pathname, to: destination });
   };
 
-  const menuTitle = formatMessage({
-    id: 'app.components.LeftMenu.navbrand.title',
-    defaultMessage: 'Strapi Dashboard',
-  });
+  // Close burger menu when route changes
+  React.useEffect(() => {
+    setIsBurgerMenuShown(false);
+  }, [pathname]);
+
+  const listLinksAlphabeticallySorted = [...pluginsSectionLinks, ...generalSectionLinks].sort(
+    (a, b) => formatter.compare(formatMessage(a.intlLabel), formatMessage(b.intlLabel))
+  );
+  const listLinks = sortLinks(listLinksAlphabeticallySorted);
+
+  /**
+   * Return filtered mobile navigation links (used for both top and burger menu)
+   */
+  const mapMobileNavigationLinks = (mobileNavLinks: MobileMenuItem[]): MenuItem[] =>
+    mobileNavLinks.reduce<MenuItem[]>((acc, mobileLink) => {
+      const linkFound = listLinks.find((link) => link.to === mobileLink.to);
+      if (linkFound) {
+        acc.push(mobileLink.link ? { ...linkFound, navigationLink: mobileLink.link } : linkFound);
+      }
+      return acc;
+    }, []);
+
+  /**
+   * Mobile top navigation
+   */
+  const topMobileNavigationLinks = mapMobileNavigationLinks(topMobileNavigation);
+
+  /**
+   * Mobile burger menu
+   */
+  const excludedPluginsFromBurgerMenu = [
+    'content-manager',
+    'content-type-builder',
+    'upload',
+    'content-releases',
+  ];
+  const burgerMenuPluginsLinks = pluginsSectionLinks.filter(
+    (plugin) => !excludedPluginsFromBurgerMenu.some((link) => plugin.to.includes(link))
+  );
+  const burgerMobileNavigationLinks = [
+    ...burgerMenuPluginsLinks,
+    ...mapMobileNavigationLinks(burgerMobileNavigation),
+  ];
 
   return (
-    <MainNav condensed={condensed}>
-      <NavBrand
-        as={RouterNavLink}
-        workplace={formatMessage({
-          id: 'app.components.LeftMenu.navbrand.workplace',
-          defaultMessage: 'Workplace',
-        })}
-        title={menuTitle}
-        icon={
-          <img
-            src={menu.custom?.url || menu.default}
-            alt={formatMessage({
-              id: 'app.components.LeftMenu.logo.alt',
-              defaultMessage: 'Application logo',
-            })}
-          />
-        }
+    <>
+      <MainNav>
+        <NavBrand />
+
+        {isDesktop && <Divider />}
+
+        <MenuDetails>
+          <NavListWrapper
+            tag="ul"
+            gap={3}
+            direction={{
+              initial: 'row',
+              large: 'column',
+            }}
+            alignItems="center"
+            justifyContent={{
+              initial: 'center',
+              large: 'flex-start',
+            }}
+            flex={1}
+            paddingLeft={{
+              initial: 3,
+              large: 0,
+            }}
+            paddingRight={{
+              initial: 3,
+              large: 0,
+            }}
+            paddingTop={3}
+            paddingBottom={3}
+          >
+            <MainNavIcons
+              listLinks={listLinks}
+              mobileLinks={topMobileNavigationLinks}
+              handleClickOnLink={handleClickOnLink}
+            />
+          </NavListWrapper>
+          <TrialCountdown />
+          <Box
+            display={{
+              initial: 'none',
+              large: 'flex',
+            }}
+            borderStyle="solid"
+            borderWidth={{
+              initial: 0,
+              large: '1px 0 0 0',
+            }}
+            borderColor="neutral150"
+            padding={3}
+          >
+            <NavUser />
+          </Box>
+        </MenuDetails>
+
+        <Box
+          padding={3}
+          display={{
+            initial: 'flex',
+            large: 'none',
+          }}
+        >
+          <IconButton
+            onClick={() => setIsBurgerMenuShown((prev) => !prev)}
+            style={{ border: 'none' }}
+            label="Menu"
+            type="button"
+            aria-expanded={isBurgerMenuShown}
+            aria-controls="burger-menu"
+          >
+            {!isBurgerMenuShown ? <List fill="neutral1000" /> : <Cross fill="neutral1000" />}
+          </IconButton>
+        </Box>
+      </MainNav>
+      <NavBurgerMenu
+        isShown={isBurgerMenuShown}
+        listLinks={burgerMobileNavigationLinks}
+        handleClickOnLink={handleClickOnLink}
+        onClose={() => setIsBurgerMenuShown(false)}
       />
-
-      <Divider />
-
-      <NavSections>
-        <NavLink
-          as={RouterNavLink}
-          // @ts-expect-error the props from the passed as prop are not inferred // joined together
-          to="/content-manager"
-          icon={<Write />}
-          onClick={() => handleClickOnLink('/content-manager')}
-        >
-          {formatMessage({ id: 'global.content-manager', defaultMessage: 'Content manager' })}
-        </NavLink>
-
-        {pluginsSectionLinks.length > 0 ? (
-          <NavSection
-            label={formatMessage({
-              id: 'app.components.LeftMenu.plugins',
-              defaultMessage: 'Plugins',
-            })}
-          >
-            {pluginsSectionLinks.map((link) => {
-              const LinkIcon = link.icon;
-              return (
-                <NavLinkWrapper key={link.to}>
-                  <NavLink
-                    as={RouterNavLink}
-                    to={link.to}
-                    icon={<LinkIcon />}
-                    onClick={() => handleClickOnLink(link.to)}
-                    // @ts-expect-error: badgeContent in the DS accept only strings
-                    badgeContent={
-                      link?.lockIcon ? (
-                        <Icon width={`${15 / 16}rem`} height={`${15 / 16}rem`} as={Lock} />
-                      ) : undefined
-                    }
-                  >
-                    {formatMessage(link.intlLabel)}
-                  </NavLink>
-                </NavLinkWrapper>
-              );
-            })}
-          </NavSection>
-        ) : null}
-
-        {generalSectionLinks.length > 0 ? (
-          <NavSection
-            label={formatMessage({
-              id: 'app.components.LeftMenu.general',
-              defaultMessage: 'General',
-            })}
-          >
-            {generalSectionLinks.map((link) => {
-              const LinkIcon = link.icon;
-
-              return (
-                <NavLink
-                  as={RouterNavLink}
-                  badgeContent={
-                    link.notificationsCount && link.notificationsCount > 0
-                      ? link.notificationsCount.toString()
-                      : undefined
-                  }
-                  // @ts-expect-error the props from the passed as prop are not inferred // joined together
-                  to={link.to}
-                  key={link.to}
-                  icon={<LinkIcon />}
-                  onClick={() => handleClickOnLink(link.to)}
-                >
-                  {formatMessage(link.intlLabel)}
-                </NavLink>
-              );
-            })}
-          </NavSection>
-        ) : null}
-      </NavSections>
-
-      <NavFooter>
-        <NavUser
-          id="main-nav-user-button"
-          ref={navUserRef}
-          onClick={handleToggleUserLinks}
-          initials={initials}
-        >
-          {userDisplayName}
-        </NavUser>
-        {userLinksVisible && (
-          <LinkUserWrapper
-            onBlur={handleBlur}
-            padding={1}
-            shadow="tableShadow"
-            background="neutral0"
-            hasRadius
-          >
-            <FocusTrap onEscape={handleToggleUserLinks}>
-              <Flex direction="column" alignItems="stretch" gap={0}>
-                <LinkUser tabIndex={0} onClick={handleToggleUserLinks} to="/me">
-                  <Typography>
-                    {formatMessage({
-                      id: 'global.profile',
-                      defaultMessage: 'Profile',
-                    })}
-                  </Typography>
-                </LinkUser>
-                <LinkUser tabIndex={0} onClick={logout} to="/auth/login">
-                  <Typography textColor="danger600">
-                    {formatMessage({
-                      id: 'app.components.LeftMenu.logout',
-                      defaultMessage: 'Logout',
-                    })}
-                  </Typography>
-                  <Exit />
-                </LinkUser>
-              </Flex>
-            </FocusTrap>
-          </LinkUserWrapper>
-        )}
-
-        <NavCondense onClick={() => setCondensed((s) => !s)}>
-          {condensed
-            ? formatMessage({
-                id: 'app.components.LeftMenu.expand',
-                defaultMessage: 'Expand the navbar',
-              })
-            : formatMessage({
-                id: 'app.components.LeftMenu.collapse',
-                defaultMessage: 'Collapse the navbar',
-              })}
-        </NavCondense>
-      </NavFooter>
-    </MainNav>
+    </>
   );
 };
 

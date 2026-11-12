@@ -1,13 +1,15 @@
 ---
 title: Strapi (WIP)
 slug: /api/Strapi
+description: 'Central Strapi class that manages project configuration, directories, and instance state.'
 tags:
-  - class
-  - public
-  - global
+  - public-api
 
 toc_min_heading_level: 2
 toc_max_heading_level: 3
+status: needs-review
+review_notes:
+  - Marked WIP. Examples use `global.strapi`, which the repo guidelines forbid (use dependency injection).
 ---
 
 import Type from '@site/docs/api/components/type';
@@ -42,18 +44,11 @@ An instance of Strapi class is available as a global in any Strapi project: `glo
 
 Instances of the Strapi class can be created using the new keyword.
 
+Strapi extends the [Container](./container) class.
+
 ```javascript
 const strapiInstance = new Strapi();
 ```
-
-### `strapi.container`
-
-- [<Type>Container</Type>](./container)
-
-The container provides a simple and efficient way to register and manage resources, making it easy to access and use them throughout the application.
-By registering a registry with the container, it can be easily retrieved by other parts of the application, making it a powerful tool for organizing and reusing code across the entire codebase.
-
-See [Container](./container).
 
 ### `strapi.dirs`
 
@@ -86,6 +81,7 @@ A set of paths to specific Strapi project parts.
 
 ### `strapi.isLoaded`
 
+{/* prettier-ignore */}
 - <Type>Boolean</Type>
 
   - `true`: Everything (all `register` and `bootstrap` functions available in your strapi project) has been loaded
@@ -133,7 +129,7 @@ strapi.eventHub.emit('user.created', { username: 'johndoe', email: 'johndoe@exam
 
 In this example, we are emitting a `user.created` event with some data attached to it, and then listening for a user.updated event and logging the data. These events can be used to trigger actions within the Strapi application or to communicate with external systems.
 
-For more information on how to use the EventEmitter class and its methods, see the [Node.js documentation](ttps://nodejs.org/docs/latest-v18.x/api/events.html#class-eventemitter).
+For more information on how to use the EventEmitter class and its methods, see the [Node.js documentation](https://nodejs.org/docs/latest-v18.x/api/events.html#class-eventemitter).
 
 ### `strapi.startupLogger`
 
@@ -191,6 +187,7 @@ By default, the telemetry service is enabled, but you can disable it by setting 
 
 ### `strapi.requestContext`
 
+{/* prettier-ignore */}
 - <Type>Object</Type> Context Storage
 
   - `run(store, cb)`: <Type>Function</Type>
@@ -202,11 +199,12 @@ The request context stores the ctx object from KoaJS on each request. This allow
 
 ### `strapi.customFields`
 
+{/* prettier-ignore */}
 - <Type>Object</Type>
 
   - `register(customField)`: <Type>Function</Type> Register a new custom field
 
-This property is a shortcut to `strapi.container.get('custom-fields').add(customField)`.
+This property is a shortcut to `strapi.get('custom-fields').add(customField)`.
 
 #### Examples
 
@@ -222,7 +220,7 @@ strapi.customFields.register({
 
 - <Type>Object</Type>
 
-Shortcut to `strapi.container.get('config')`.
+Shortcut to `strapi.get('config')`.
 
 See the [config container](#config).
 
@@ -230,7 +228,7 @@ See the [config container](#config).
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('services').getAll()`.
+Shortcut to `strapi.get('services').getAll()`.
 
 See the [services' container](#services).
 
@@ -238,7 +236,7 @@ See the [services' container](#services).
 
 - `uid`: <Type>String</Type>
 
-Shortcut to `strapi.container.get('services').get(uid)`.
+Shortcut to `strapi.get('services').get(uid)`.
 
 See the [services' container](#services).
 
@@ -246,7 +244,7 @@ See the [services' container](#services).
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('controllers').getAll()`.
+Shortcut to `strapi.get('controllers').getAll()`.
 
 See the [controllers' container](#controllers).
 
@@ -254,7 +252,7 @@ See the [controllers' container](#controllers).
 
 - `uid`: <Type>String</Type>
 
-Shortcut to `strapi.container.get('controllers').get(uid)`.
+Shortcut to `strapi.get('controllers').get(uid)`.
 
 See the [controllers' container](#controllers).
 
@@ -262,7 +260,7 @@ See the [controllers' container](#controllers).
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('content-types').getAll()`.
+Shortcut to `strapi.get('content-types').getAll()`.
 
 See the [content-types' container](#content-types).
 
@@ -270,7 +268,7 @@ See the [content-types' container](#content-types).
 
 - `name`: <Type>String</Type>
 
-Shortcut to `strapi.container.get('content-types').get(name)`.
+Shortcut to `strapi.get('content-types').get(name)`.
 
 See the [content-types' container](#content-types).
 
@@ -278,7 +276,7 @@ See the [content-types' container](#content-types).
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('policies').getAll()`.
+Shortcut to `strapi.get('policies').getAll()`.
 
 See the [policies' container](#policies).
 
@@ -286,7 +284,7 @@ See the [policies' container](#policies).
 
 - `name`: <Type>String</Type>
 
-Shortcut to `strapi.container.get('policies').get(name)`.
+Shortcut to `strapi.get('policies').get(name)`.
 
 See the [policies' container](#policies).
 
@@ -294,7 +292,7 @@ See the [policies' container](#policies).
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('middlewares').getAll()`.
+Shortcut to `strapi.get('middlewares').getAll()`.
 
 See the [middlewares container](#middlewares).
 
@@ -302,7 +300,7 @@ See the [middlewares container](#middlewares).
 
 - `name`: <Type>String</Type>
 
-Shortcut to `strapi.container.get('middlewares').get(name)`.
+Shortcut to `strapi.get('middlewares').get(name)`.
 
 See the [middlewares container](#middlewares).
 
@@ -310,7 +308,7 @@ See the [middlewares container](#middlewares).
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('plugins').getAll()`.
+Shortcut to `strapi.get('plugins').getAll()`.
 
 See the [plugins' container](#plugins).
 
@@ -318,7 +316,7 @@ See the [plugins' container](#plugins).
 
 - `name`: <Type>String</Type>
 
-Shortcut to `strapi.container.get('plugins').get(name)`.
+Shortcut to `strapi.get('plugins').get(name)`.
 
 See the [plugins' container](#plugins).
 
@@ -326,7 +324,7 @@ See the [plugins' container](#plugins).
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('hooks').getAll()`.
+Shortcut to `strapi.get('hooks').getAll()`.
 
 See the [hooks' container](#hooks).
 
@@ -334,15 +332,23 @@ See the [hooks' container](#hooks).
 
 - `name`: <Type>String</Type>
 
-Shortcut to `strapi.container.get('hooks').get(name)`.
+Shortcut to `strapi.get('hooks').get(name)`.
 
 See the [hooks' container](#hooks).
 
-### `strapi.api`
+### `strapi.apis`
 
 - <Type>Object[]</Type>
 
-Shortcut to `strapi.container.get('apis').getAll()`.
+Shortcut to `strapi.get('apis').getAll()`.
+
+See the [apis container](#apis).
+
+### `strapi.api(name)`
+
+- `name`: <Type>String</Type>
+
+Shortcut to `strapi.get('apis').get(name)`.
 
 See the [apis container](#apis).
 
@@ -350,7 +356,7 @@ See the [apis container](#apis).
 
 - <Type>Object</Type>
 
-Shortcut to `strapi.container.get('auth')`.
+Shortcut to `strapi.get('auth')`.
 
 See the [auth' container](#auth).
 
@@ -358,7 +364,7 @@ See the [auth' container](#auth).
 
 - <Type>Object</Type>
 
-Shortcut to `strapi.container.get('content-api')`.
+Shortcut to `strapi.get('content-api')`.
 
 See the [content-api container](#content-api).
 
@@ -366,7 +372,7 @@ See the [content-api container](#content-api).
 
 - <Type>Object</Type>
 
-Shortcut to `strapi.container.get('sanitizers')`.
+Shortcut to `strapi.get('sanitizers')`.
 
 See the [sanitizers' container](#sanitizers).
 
@@ -374,7 +380,7 @@ See the [sanitizers' container](#sanitizers).
 
 - <Type>Object</Type>
 
-Shortcut to `strapi.container.get('validators')`.
+Shortcut to `strapi.get('validators')`.
 
 See the [validators' container](#validators).
 
@@ -530,14 +536,6 @@ TODO
 TODO
 :::
 
-### `strapi.startWebhooks()`
-
-- Returns: Promise
-
-:::info
-TODO
-:::
-
 ### `strapi.reload()`
 
 :::info
@@ -560,7 +558,7 @@ TODO
 TODO
 :::
 
-### `strapi.query(uid)`
+### `strapi.db.query(uid)`
 
 - `uid`: <Type>String</Type>
 
@@ -570,10 +568,11 @@ TODO
 
 ## Strapi containers
 
-The strapi containers are accessible via `strapi.container.get('name-of-the-container')`.
+The strapi containers are accessible via `strapi.get('name-of-the-container')`.
 
 ### `config`
 
+{/* prettier-ignore */}
 - <Type>Object</Type>
 
   - `get(path, defaultValue)`: <Type>Function</Type>
@@ -620,6 +619,12 @@ TODO
 :::
 
 ### `policies`
+
+:::info
+TODO
+:::
+
+### `middlewares`
 
 :::info
 TODO

@@ -2,7 +2,7 @@
  * @internal
  * @description Mutates a value to be a union of flat values, no arrays allowed.
  */
-type Flat<T> = T extends string ? T : T extends ArrayLike<any> ? never : T;
+type Flat<T> = T extends string ? T : T extends ArrayLike<unknown> ? never : T;
 
 /**
  * @internal
@@ -22,15 +22,18 @@ const flattenDeep = <T>(
   array?: ArrayOfRecursiveArraysOrValues<T> | null | undefined
 ): Array<Flat<T>> => {
   if (Array.isArray(array)) {
-    return array.reduce((acc, value) => {
-      if (Array.isArray(value)) {
-        acc.push(...flattenDeep(value));
-      } else {
-        acc.push(value);
-      }
+    return array.reduce(
+      (acc, value) => {
+        if (Array.isArray(value)) {
+          acc.push(...flattenDeep(value));
+        } else {
+          acc.push(value);
+        }
 
-      return acc;
-    }, [] as Array<Flat<T>>);
+        return acc;
+      },
+      [] as Array<Flat<T>>
+    );
   } else {
     return [];
   }

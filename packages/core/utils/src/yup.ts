@@ -1,14 +1,13 @@
 /* eslint-disable no-template-curly-in-string */
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 import * as yup from 'yup';
-import _ from 'lodash';
-import { isNumber, isInteger, get } from 'lodash/fp';
-import * as utils from './string-formatting';
+import _, { isNumber, get } from 'lodash';
+import { strings } from './primitives';
 import { printValue } from './print-value';
+import { EMAIL_REGEX } from './email-regex';
 
 export * from 'yup';
 
-// @ts-ignore
 export const strapiID = (): InstanceType<typeof StrapiIDSchema> => new StrapiIDSchema();
 
 const isNotNilTest = (value: unknown) => !_.isNil(value);
@@ -36,7 +35,7 @@ yup.addMethod(
   'isCamelCase',
   function isCamelCase(message = '${path} is not in camel case (anExampleOfCamelCase)') {
     return this.test('is in camelCase', message, (value) =>
-      value ? utils.isCamelCase(value) : true
+      value ? strings.isCamelCase(value) : true
     );
   }
 );
@@ -46,7 +45,7 @@ yup.addMethod(
   'isKebabCase',
   function isKebabCase(message = '${path} is not in kebab case (an-example-of-kebab-case)') {
     return this.test('is in kebab-case', message, (value) =>
-      value ? utils.isKebabCase(value) : true
+      value ? strings.isKebabCase(value) : true
     );
   }
 );
@@ -72,7 +71,7 @@ yup.addMethod(
 
       list?.forEach((element, index) => {
         const sameElements = list.filter(
-          (e) => get(propertyName, e) === get(propertyName, element)
+          (e) => get(e, propertyName) === get(element, propertyName)
         );
         if (sameElements.length > 1) {
           errors.push(
@@ -92,32 +91,51 @@ yup.addMethod(
   }
 );
 
+// Stock yup reads the default message from its locale each time `.email()` is called, so
+// `yup.setLocale({ string: { email } })` takes effect. Building a schema with yup's own method and
+// reading the message it stored keeps that behaviour, without running any input through the old
+// regex.
+const yupEmail = yup.StringSchema.prototype.email;
+
+const defaultEmailMessage = () => {
+  const { tests } = yupEmail.call(yup.string());
+  return tests[tests.length - 1].OPTIONS.message;
+};
+
+yup.addMethod(
+  yup.string,
+  'email',
+  function email(message: Parameters<yup.StringSchema['email']>[0] = defaultEmailMessage()) {
+    return this.matches(EMAIL_REGEX, { name: 'email', message, excludeEmptyString: true });
+  }
+);
+
 export class StrapiIDSchema extends yup.MixedSchema {
   constructor() {
     super({ type: 'strapiID' });
   }
 
   _typeCheck(value: unknown): value is string | number {
-    return typeof value === 'string' || (isNumber(value) && isInteger(value) && value >= 0);
+    return typeof value === 'string' || (isNumber(value) && Number.isInteger(value) && value >= 0);
   }
 }
 
 declare module 'yup' {
-  const strapiID: () => InstanceType<typeof StrapiIDSchema>;
+  // const strapiID: () => InstanceType<typeof StrapiIDSchema>;
 
-  interface BaseSchema {
+  export interface BaseSchema {
     isFunction(message?: string): this;
     notNil(message?: string): this;
     notNull(message?: string): this;
   }
 
-  interface StringSchema {
+  export interface StringSchema {
     isCamelCase(message?: string): this;
     isKebabCase(message?: string): this;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  interface ObjectSchema<TShape> {
+  export interface ObjectSchema<TShape> {
     onlyContainsFunctions(message?: string): this;
   }
 }

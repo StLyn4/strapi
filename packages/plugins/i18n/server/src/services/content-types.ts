@@ -1,20 +1,25 @@
-import _ from 'lodash';
-import { pick, pipe, has, prop, isNil, cloneDeep, isArray, difference } from 'lodash/fp';
+import { get, has, cloneDeep, pick } from 'lodash';
 import { errors, contentTypes as contentTypeUtils } from '@strapi/utils';
+import type { Struct } from '@strapi/types';
 import { getService } from '../utils';
 
-const { isRelationalAttribute, getVisibleAttributes, isTypedAttribute, getScalarAttributes } =
-  contentTypeUtils;
+const {
+  isRelationalAttribute,
+  getVisibleAttributes,
+  isTypedAttribute,
+  getScalarAttributes,
+  getRelationalAttributes,
+} = contentTypeUtils;
 const { ApplicationError } = errors;
 
 const hasLocalizedOption = (modelOrAttribute: any) => {
-  return prop('pluginOptions.i18n.localized', modelOrAttribute) === true;
+  return get(modelOrAttribute, 'pluginOptions.i18n.localized') === true;
 };
 
 const getValidLocale = async (locale: any) => {
   const localesService = getService('locales');
 
-  if (isNil(locale)) {
+  if (locale == null) {
     return localesService.getDefaultLocale();
   }
 
@@ -24,53 +29,6 @@ const getValidLocale = async (locale: any) => {
   }
 
   return locale;
-};
-
-/**
- * Get the related entity used for entity creation
- * @param {Object} relatedEntity related entity
- * @returns {id[]} related entity
- */
-const getNewLocalizationsFrom = async (relatedEntity: any) => {
-  if (relatedEntity) {
-    return [relatedEntity.id, ...relatedEntity.localizations.map(prop('id'))];
-  }
-
-  return [];
-};
-
-/**
- * Get the related entity used for entity creation
- * @param {id} relatedEntityId related entity id
- * @param {string} model corresponding model
- * @param {string} locale locale of the entity to create
- * @returns {Object} related entity
- */
-const getAndValidateRelatedEntity = async (relatedEntityId: any, model: any, locale: any) => {
-  const { kind } = strapi.getModel(model) as any;
-  let relatedEntity;
-
-  if (kind === 'singleType') {
-    relatedEntity = await strapi.query(model).findOne({ populate: ['localizations'] });
-  } else if (relatedEntityId) {
-    relatedEntity = await strapi
-      .query(model)
-      .findOne({ where: { id: relatedEntityId }, populate: ['localizations'] });
-  }
-
-  if (relatedEntityId && !relatedEntity) {
-    throw new ApplicationError("The related entity doesn't exist");
-  }
-
-  if (
-    relatedEntity &&
-    (relatedEntity.locale === locale ||
-      relatedEntity.localizations.map(prop('locale')).includes(locale))
-  ) {
-    throw new ApplicationError('The entity already exists in this locale');
-  }
-
-  return relatedEntity;
 };
 
 /**
@@ -107,38 +65,42 @@ const getNonLocalizedAttributes = (model: any) => {
 };
 
 const removeId = (value: any) => {
-  if (typeof value === 'object' && has('id', value)) {
+  if (typeof value === 'object' && has(value, 'id')) {
     delete value.id;
   }
 };
 
-const removeIds = (model: any) => (entry: any) => removeIdsMut(model, cloneDeep(entry));
+const removeIds = (model: Struct.ComponentSchema | Struct.ContentTypeSchema) => (entry: any) =>
+  removeIdsMut(model, cloneDeep(entry));
 
-const removeIdsMut = (model: any, entry: any) => {
-  if (isNil(entry)) {
-    return entry;
+const removeIdsMut = (
+  model: Struct.ComponentSchema | Struct.ContentTypeSchema,
+  entry: any
+): Record<string, any> => {
+  if (entry == null) {
+    return entry as unknown as Record<string, any>;
   }
 
   removeId(entry);
 
-  _.forEach(model.attributes, (attr, attrName) => {
+  for (const [attrName, attr] of Object.entries(model.attributes)) {
     const value = entry[attrName];
-    if (attr.type === 'dynamiczone' && isArray(value)) {
+    if (attr.type === 'dynamiczone' && Array.isArray(value)) {
       value.forEach((compo) => {
-        if (has('__component', compo)) {
+        if (has(compo, '__component')) {
           const model = strapi.components[compo.__component];
           removeIdsMut(model, compo);
         }
       });
     } else if (attr.type === 'component') {
       const model = strapi.components[attr.component];
-      if (isArray(value)) {
+      if (Array.isArray(value)) {
         value.forEach((compo) => removeIdsMut(model, compo));
       } else {
         removeIdsMut(model, value);
       }
     }
-  });
+  }
 
   return entry;
 };
@@ -149,10 +111,13 @@ const removeIdsMut = (model: any, entry: any) => {
  * @param {object} entry
  * @returns {object}
  */
-const copyNonLocalizedAttributes = (model: any, entry: any) => {
+const copyNonLocalizedAttributes = (
+  model: Struct.ComponentSchema | Struct.ContentTypeSchema,
+  entry: any
+) => {
   const nonLocalizedAttributes = getNonLocalizedAttributes(model);
 
-  return pipe(pick(nonLocalizedAttributes), removeIds(model))(entry);
+  return removeIds(model)(pick(entry, nonLocalizedAttributes));
 };
 
 /**
@@ -166,6 +131,9 @@ const getLocalizedAttributes = (model: any) => {
   );
 };
 
+const isPresentObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /**
  * Fill non localized fields of an entry if there are nil
  * @param {Object} entry entry to fill
@@ -174,31 +142,68 @@ const getLocalizedAttributes = (model: any) => {
  * @param {Object} options.model corresponding model
  */
 const fillNonLocalizedAttributes = (entry: any, relatedEntry: any, { model }: any) => {
-  if (isNil(relatedEntry)) {
+  if (relatedEntry == null || entry == null) {
     return;
   }
 
   const modelDef = strapi.getModel(model);
+  if (!modelDef) {
+    return;
+  }
+
   const relatedEntryCopy = copyNonLocalizedAttributes(modelDef, relatedEntry);
 
-  _.forEach(relatedEntryCopy, (value, field) => {
-    if (isNil(entry[field])) {
+  for (const [field, value] of Object.entries(relatedEntryCopy)) {
+    const attr = modelDef.attributes?.[field];
+    // Empty arrays are the admin create-locale default for required repeatable
+    // components and dynamic zones. Other array-valued fields, such as JSON and
+    // multiple media, may be intentionally cleared and must remain untouched.
+    const isEmptyComponentValue =
+      Array.isArray(entry[field]) &&
+      entry[field].length === 0 &&
+      ((attr?.type === 'component' && attr.repeatable) || attr?.type === 'dynamiczone');
+    const isUnset = entry[field] == null || isEmptyComponentValue;
+
+    if (isUnset) {
       entry[field] = value;
+      continue;
     }
-  });
+
+    // A present-but-shallow non-repeatable component (nested keys omitted or [])
+    // must still inherit those nested values. Otherwise saving a secondary locale
+    // syncs the shallow object to every locale and wipes nested data.
+    if (
+      attr?.type === 'component' &&
+      !attr.repeatable &&
+      isPresentObject(entry[field]) &&
+      isPresentObject(value)
+    ) {
+      fillNonLocalizedAttributes(entry[field], value, { model: attr.component });
+    }
+  }
 };
 
 /**
  * build the populate param to
  * @param {String} modelUID uid of the model, could be of a content-type or a component
  */
-const getNestedPopulateOfNonLocalizedAttributes = (modelUID: any) => {
+const getNestedPopulateOfNonLocalizedAttributes = (modelUID: any): string[] => {
   const schema = strapi.getModel(modelUID);
   const scalarAttributes = getScalarAttributes(schema);
   const nonLocalizedAttributes = getNonLocalizedAttributes(schema);
-  const currentAttributesToPopulate = difference(nonLocalizedAttributes, scalarAttributes);
-  const attributesToPopulate = [...currentAttributesToPopulate];
 
+  const allAttributes = [...scalarAttributes, ...nonLocalizedAttributes];
+  if (schema.modelType === 'component') {
+    // When called recursively on a non localized component we
+    // need to explicitly populate that components relations
+    allAttributes.push(...getRelationalAttributes(schema));
+  }
+
+  const currentAttributesToPopulate = allAttributes.filter((value, index, self) => {
+    return self.indexOf(value) === index && self.lastIndexOf(value) === index;
+  });
+
+  const attributesToPopulate = [...currentAttributesToPopulate];
   for (const attrName of currentAttributesToPopulate) {
     const attr = schema.attributes[attrName];
     if (attr.type === 'component') {
@@ -222,11 +227,9 @@ const getNestedPopulateOfNonLocalizedAttributes = (modelUID: any) => {
 const contentTypes = () => ({
   isLocalizedContentType,
   getValidLocale,
-  getNewLocalizationsFrom,
   getLocalizedAttributes,
   getNonLocalizedAttributes,
   copyNonLocalizedAttributes,
-  getAndValidateRelatedEntity,
   fillNonLocalizedAttributes,
   getNestedPopulateOfNonLocalizedAttributes,
 });

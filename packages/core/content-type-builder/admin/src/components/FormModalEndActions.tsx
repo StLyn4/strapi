@@ -6,15 +6,13 @@
 
 import { SyntheticEvent } from 'react';
 
-import { Button } from '@strapi/design-system';
+import { Button, Flex } from '@strapi/design-system';
 import { Plus } from '@strapi/icons';
 import { useIntl } from 'react-intl';
 
 import { getTrad } from '../utils';
 
 type FormModalEndActionsProps = {
-  categoryName?: string;
-  deleteCategory: (categoryName: string) => void;
   deleteComponent: () => void;
   deleteContentType: () => void;
   isAttributeModal: boolean;
@@ -31,7 +29,6 @@ type FormModalEndActionsProps = {
   isCreatingDz: boolean;
   isDzAttribute: boolean;
   isEditingAttribute: boolean;
-  isEditingCategory: boolean;
   isInFirstComponentStep: boolean;
   onSubmitAddComponentAttribute: (e: SyntheticEvent, shouldContinue: boolean) => void;
   onSubmitAddComponentToDz: (e: SyntheticEvent, shouldContinue: boolean) => void;
@@ -39,7 +36,6 @@ type FormModalEndActionsProps = {
   onSubmitCreateComponent: (e: SyntheticEvent, shouldContinue: boolean) => void;
   onSubmitCreateDz: (e: SyntheticEvent, shouldContinue: boolean) => void;
   onSubmitEditAttribute: (e: SyntheticEvent, shouldContinue: boolean) => void;
-  onSubmitEditCategory: (e: SyntheticEvent) => void;
   onSubmitEditComponent: (e: SyntheticEvent, shouldContinue: boolean) => void;
   onSubmitEditContentType: (e: SyntheticEvent, shouldContinue: boolean) => void;
   onSubmitEditCustomFieldAttribute: (e: SyntheticEvent, shouldContinue: boolean) => void;
@@ -48,8 +44,6 @@ type FormModalEndActionsProps = {
 };
 
 export const FormModalEndActions = ({
-  categoryName,
-  deleteCategory,
   deleteComponent,
   deleteContentType,
   isAttributeModal,
@@ -66,7 +60,6 @@ export const FormModalEndActions = ({
   isComponentModal,
   isDzAttribute,
   isEditingAttribute,
-  isEditingCategory,
   isInFirstComponentStep,
   onSubmitAddComponentAttribute,
   onSubmitAddComponentToDz,
@@ -74,7 +67,6 @@ export const FormModalEndActions = ({
   onSubmitCreateComponent,
   onSubmitCreateDz,
   onSubmitEditAttribute,
-  onSubmitEditCategory,
   onSubmitEditComponent,
   onSubmitEditContentType,
   onSubmitEditCustomFieldAttribute,
@@ -205,7 +197,7 @@ export const FormModalEndActions = ({
     }
 
     return (
-      <>
+      <Flex gap={2}>
         <Button
           variant="secondary"
           type="submit"
@@ -241,13 +233,13 @@ export const FormModalEndActions = ({
             defaultMessage: 'Finish',
           })}
         </Button>
-      </>
+      </Flex>
     );
   }
 
   if (isAttributeModal && !isComponentAttribute && !isDzAttribute) {
     return (
-      <>
+      <Flex gap={2}>
         <Button
           type={isEditingAttribute ? 'button' : 'submit'}
           variant="secondary"
@@ -278,13 +270,13 @@ export const FormModalEndActions = ({
             defaultMessage: 'Finish',
           })}
         </Button>
-      </>
+      </Flex>
     );
   }
 
   if (isContentTypeModal) {
     return (
-      <>
+      <Flex gap={2}>
         {!isCreatingContentType && (
           <>
             <Button
@@ -332,13 +324,13 @@ export const FormModalEndActions = ({
             })}
           </Button>
         )}
-      </>
+      </Flex>
     );
   }
 
   if (isComponentModal) {
     return (
-      <>
+      <Flex gap={2}>
         {!isCreatingComponent && (
           <>
             <Button
@@ -386,49 +378,13 @@ export const FormModalEndActions = ({
             })}
           </Button>
         )}
-      </>
-    );
-  }
-
-  if (isEditingCategory) {
-    return (
-      <>
-        <Button
-          type="button"
-          variant="danger"
-          onClick={(e: SyntheticEvent) => {
-            e.preventDefault();
-            if (categoryName) {
-              deleteCategory(categoryName);
-            }
-          }}
-        >
-          {formatMessage({
-            id: 'global.delete',
-            defaultMessage: 'Delete',
-          })}
-        </Button>
-        <Button
-          type="submit"
-          variant="default"
-          onClick={(e: SyntheticEvent) => {
-            e.preventDefault();
-
-            onSubmitEditCategory(e);
-          }}
-        >
-          {formatMessage({
-            id: 'global.finish',
-            defaultMessage: 'finish',
-          })}
-        </Button>
-      </>
+      </Flex>
     );
   }
 
   if (isCustomFieldModal) {
     return (
-      <>
+      <Flex gap={2}>
         <Button
           type={isEditingAttribute ? 'button' : 'submit'}
           variant="secondary"
@@ -459,7 +415,7 @@ export const FormModalEndActions = ({
             defaultMessage: 'Finish',
           })}
         </Button>
-      </>
+      </Flex>
     );
   }
 

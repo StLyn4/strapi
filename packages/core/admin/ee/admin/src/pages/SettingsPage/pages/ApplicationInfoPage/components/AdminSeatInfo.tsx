@@ -1,15 +1,13 @@
-import { Flex, GridItem, Icon, Tooltip, Typography } from '@strapi/design-system';
-import { Link } from '@strapi/design-system/v2';
-import { pxToRem, useRBAC } from '@strapi/helper-plugin';
-import { ExclamationMarkCircle, ExternalLink } from '@strapi/icons';
+import type { ReactNode } from 'react';
+
+import { Flex, Tooltip, Typography } from '@strapi/design-system';
+import { WarningCircle } from '@strapi/icons';
 import { useIntl } from 'react-intl';
 import { useSelector } from 'react-redux';
 
+import { useRBAC } from '../../../../../../../../admin/src/hooks/useRBAC';
 import { selectAdminPermissions } from '../../../../../../../../admin/src/selectors';
 import { useLicenseLimits } from '../../../../../hooks/useLicenseLimits';
-
-const BILLING_STRAPI_CLOUD_URL = 'https://cloud.strapi.io/profile/billing';
-const BILLING_SELF_HOSTED_URL = 'https://strapi.io/billing/request-seats';
 
 export const AdminSeatInfoEE = () => {
   const { formatMessage } = useIntl();
@@ -36,15 +34,24 @@ export const AdminSeatInfoEE = () => {
     return null;
   }
 
-  const { licenseLimitStatus, enforcementUserCount, permittedSeats, isHostedOnStrapiCloud } =
-    license;
+  const { enforcementUserCount, permittedSeats, seats } = license;
 
-  if (!permittedSeats) {
+  // `permittedSeats` is the live enforcement limit and is wiped once the licence stops being
+  // usable, so fall back to the retained `seats` to keep showing the count on an expired
+  // licence. Enforcement itself (`licenseLimitStatus`, `shouldStopCreate`) still runs off
+  // `permittedSeats` server-side and is untouched by this.
+  const seatLimit = permittedSeats ?? seats;
+
+  if (!seatLimit) {
     return null;
   }
 
+  // The red count and the warning follow the same displayed limit. Server-side
+  // `licenseLimitStatus` tracks only the live limit, so it is empty once the licence expires.
+  const isOverLimit = enforcementUserCount > seatLimit;
+
   return (
-    <GridItem col={6} s={12}>
+    <Flex direction="column" alignItems="start" gap={2}>
       <Typography variant="sigma" textColor="neutral600">
         {formatMessage({
           id: 'Settings.application.admin-seats',
@@ -53,58 +60,38 @@ export const AdminSeatInfoEE = () => {
       </Typography>
       <Flex gap={2}>
         <Flex>
-          <Typography as="p">
+          <Typography tag="p">
             {formatMessage(
               {
                 id: 'Settings.application.ee.admin-seats.count',
                 defaultMessage: '<text>{enforcementUserCount}</text>/{permittedSeats}',
               },
               {
-                permittedSeats,
+                permittedSeats: seatLimit,
                 enforcementUserCount,
-                text: (chunks) =>
-                  (
-                    <Typography
-                      fontWeight="semiBold"
-                      textColor={enforcementUserCount > permittedSeats ? 'danger500' : undefined}
-                    >
-                      {chunks}
-                    </Typography>
-                  ) as any,
+                text: (chunks: ReactNode) => (
+                  <Typography
+                    fontWeight="semiBold"
+                    textColor={isOverLimit ? 'danger500' : undefined}
+                  >
+                    {chunks}
+                  </Typography>
+                ),
               }
             )}
           </Typography>
         </Flex>
-        {licenseLimitStatus === 'OVER_LIMIT' && (
+        {isOverLimit && (
           <Tooltip
-            description={formatMessage({
+            label={formatMessage({
               id: 'Settings.application.ee.admin-seats.at-limit-tooltip',
               defaultMessage: 'At limit: add seats to invite more users',
             })}
           >
-            <Icon
-              width={pxToRem(14)}
-              height={pxToRem(14)}
-              color="danger500"
-              as={ExclamationMarkCircle}
-            />
+            <WarningCircle width="1.4rem" height="1.4rem" fill="danger500" />
           </Tooltip>
         )}
       </Flex>
-      <Link
-        href={isHostedOnStrapiCloud ? BILLING_STRAPI_CLOUD_URL : BILLING_SELF_HOSTED_URL}
-        isExternal
-        endIcon={<ExternalLink />}
-      >
-        {formatMessage(
-          {
-            id: 'Settings.application.ee.admin-seats.add-seats',
-            defaultMessage:
-              '{isHostedOnStrapiCloud, select, true {Add seats} other {Contact sales}}',
-          },
-          { isHostedOnStrapiCloud }
-        )}
-      </Link>
-    </GridItem>
+    </Flex>
   );
 };

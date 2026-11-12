@@ -1,8 +1,10 @@
-import type { UID, Schema } from '@strapi/types';
+import type { Internal, Struct } from '@strapi/types';
 import { get, has } from 'lodash';
 
 import { formatAttributes, replaceTemporaryUIDs } from '../utils/attributes';
+import { emitSchemaEvent } from '../utils/events';
 import createBuilder from './schema-builder';
+import type { SchemaHandler } from './schema-builder/schema-handler';
 
 /**
  * Formats a component attributes
@@ -29,7 +31,10 @@ export const formatComponent = (component: any) => {
 /**
  * Creates a component and handle the nested components sent with it
  */
-export const createComponent = async ({ component, components = [] }: any) => {
+export const createComponent = async ({
+  component,
+  components = [],
+}: any): Promise<SchemaHandler<Internal.UID.Component>> => {
   const builder = createBuilder();
 
   const uidMap = builder.createNewComponentUIDMap(components);
@@ -47,20 +52,20 @@ export const createComponent = async ({ component, components = [] }: any) => {
 
   await builder.writeFiles();
 
-  strapi.eventHub.emit('component.create', { component: newComponent });
+  await emitSchemaEvent('component.create', { component: newComponent });
 
   return newComponent;
 };
 
 type ComponentToCreate = {
-  component: Schema.Component;
-  components?: Schema.Component[];
+  component: Struct.ComponentSchema;
+  components?: Struct.ComponentSchema[];
 };
 
 export const editComponent = async (
-  uid: UID.Component,
+  uid: Internal.UID.Component,
   { component, components = [] }: ComponentToCreate
-) => {
+): Promise<SchemaHandler<Internal.UID.Component>> => {
   const builder = createBuilder();
 
   const uidMap = builder.createNewComponentUIDMap(components);
@@ -81,19 +86,19 @@ export const editComponent = async (
 
   await builder.writeFiles();
 
-  strapi.eventHub.emit('component.update', { component: updatedComponent });
+  await emitSchemaEvent('component.update', { component: updatedComponent });
 
   return updatedComponent;
 };
 
-export const deleteComponent = async (uid: UID.Component) => {
+export const deleteComponent = async (uid: Internal.UID.Component) => {
   const builder = createBuilder();
 
   const deletedComponent = builder.deleteComponent(uid);
 
   await builder.writeFiles();
 
-  strapi.eventHub.emit('component.delete', { component: deletedComponent });
+  await emitSchemaEvent('component.delete', { component: deletedComponent });
 
   return deletedComponent;
 };

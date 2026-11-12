@@ -1,12 +1,32 @@
 import { errors } from '@strapi/utils';
-import { Schema, Common, EntityService } from '@strapi/types';
+import type { Modules, Struct, UID } from '@strapi/types';
 
-// Admin entity response follows the same format as the entity service
-type Entity = EntityService.Result<Common.UID.Schema>;
-type PaginatedEntities = EntityService.PaginatedResult<Common.UID.Schema>;
+type PaginatedDocuments = Modules.Documents.PaginatedResult<UID.Schema>;
+type SortQuery = Modules.Documents.Params.Sort.StringNotation<UID.Schema> & string;
 
-type PaginationQuery = EntityService.Params.Pagination.PageNotation;
-type SortQuery = EntityService.Params.Sort.StringNotation<Common.UID.Schema> & string;
+// Admin document response follows the same format as the document service
+type Document = Modules.Documents.Document<any>;
+type AT_FIELDS = 'updatedAt' | 'createdAt' | 'publishedAt';
+type BY_FIELDS = 'createdBy' | 'updatedBy' | 'publishedBy';
+
+export type AvailableLocaleDocument = Pick<Document, 'id' | 'locale' | AT_FIELDS | 'status'>;
+export type AvailableStatusDocument = Pick<
+  Document,
+  'id' | 'documentId' | 'locale' | BY_FIELDS | AT_FIELDS
+>;
+export type DocumentMetadata = {
+  // All status of the returned locale
+  availableStatus: AvailableStatusDocument[];
+  // Available locales within the same status of the returned document
+  availableLocales: AvailableLocaleDocument[];
+  /**
+   * i18n default locale code (e.g. `en`). Present when the content type is
+   * localized; used by the admin to lock non-localized fields on secondary
+   * locales. Not inferred from `availableLocales[0]` because that list
+   * excludes the currently viewed locale.
+   */
+  defaultLocale?: string | null;
+};
 
 /**
  * GET /collection-types/:model
@@ -15,9 +35,9 @@ export declare namespace Find {
   export interface Request {
     body: {};
     query: {
-      page: PaginationQuery['page'];
-      pageSize: PaginationQuery['pageSize'];
-      sort: SortQuery;
+      page?: string;
+      pageSize?: string;
+      sort?: SortQuery;
     };
   }
 
@@ -25,9 +45,7 @@ export declare namespace Find {
     model: string;
   }
 
-  export interface Response {
-    results: PaginatedEntities['results'];
-    pagination: PaginatedEntities['pagination'];
+  export interface Response extends PaginatedDocuments {
     error?: errors.ApplicationError;
   }
 }
@@ -38,16 +56,19 @@ export declare namespace Find {
 export declare namespace FindOne {
   export interface Request {
     body: {};
-    query: {};
+    query: {
+      locale?: string | null;
+    };
   }
 
   export interface Params {
     model: string;
-    id: number;
+    documentId: Modules.Documents.ID;
   }
 
   export interface Response {
-    data: Entity;
+    data: Document;
+    meta: DocumentMetadata;
     error?: errors.ApplicationError;
   }
 }
@@ -57,7 +78,7 @@ export declare namespace FindOne {
  */
 export declare namespace Create {
   export interface Request {
-    body: Schema.Attributes;
+    body: Struct.SchemaAttributes;
     query: {};
   }
 
@@ -66,10 +87,13 @@ export declare namespace Create {
   }
 
   export interface Response {
-    data: Entity;
+    data: Document;
+    meta: DocumentMetadata;
     error?: errors.ApplicationError;
   }
 }
+
+export type ProhibitedCloningField = [fieldNames: string[], 'unique' | 'relation'];
 
 /**
  * POST /collection-types/:model/auto-clone/:sourceId
@@ -77,19 +101,22 @@ export declare namespace Create {
 export declare namespace AutoClone {
   export interface Request {
     body: {};
-    query: {};
   }
 
   export interface Params {
     model: string;
-    sourceId: Entity['id'];
+    sourceId: Modules.Documents.ID;
   }
 
-  export type Response =
-    | Entity
-    | {
-        error?: errors.ApplicationError;
-      };
+  export interface Response {
+    data: Document;
+    meta: DocumentMetadata;
+    error?: errors.ApplicationError<
+      'BadRequestError',
+      string,
+      { prohibitedFields: ProhibitedCloningField[] }
+    >;
+  }
 }
 
 /**
@@ -97,37 +124,43 @@ export declare namespace AutoClone {
  */
 export declare namespace Clone {
   export interface Request {
-    body: Schema.Attributes;
-    query: {};
+    body: Struct.SchemaAttributes;
+    query: {
+      locale?: string | null;
+    };
   }
 
   export interface Params {
     model: string;
-    sourceId: number;
+    sourceId: Modules.Documents.ID;
   }
 
   export interface Response {
-    data: Entity;
+    data: Document;
+    meta: DocumentMetadata;
     error?: errors.ApplicationError;
   }
 }
 
 /**
- * POST /collection-types/:model/:id
+ * PUT /collection-types/:model/:id
  */
 export declare namespace Update {
   export interface Request {
-    body: Entity;
-    query: {};
+    body: Partial<Document>;
+    query: {
+      locale?: string | null;
+    };
   }
 
   export interface Params {
     model: string;
-    id: number;
+    documentId: Modules.Documents.ID;
   }
 
   export interface Response {
-    data: Entity;
+    data: Document;
+    meta: DocumentMetadata;
     error?: errors.ApplicationError;
   }
 }
@@ -138,16 +171,41 @@ export declare namespace Update {
 export declare namespace Delete {
   export interface Request {
     body: {};
-    query: {};
+    query: {
+      locale?: string | null;
+    };
   }
 
   export interface Params {
     model: string;
-    id: Entity['id'];
+    documentId: Modules.Documents.ID;
   }
 
   export interface Response {
-    data: Entity;
+    data: Document;
+    meta: DocumentMetadata;
+    error?: errors.ApplicationError;
+  }
+}
+
+/**
+ * POST /collection-types/:model/actions/publish
+ */
+export declare namespace PublishAndCreate {
+  export interface Request {
+    body: Partial<Document>;
+    query: {
+      locale?: string | null;
+    };
+  }
+
+  export interface Params {
+    model: string;
+  }
+
+  export interface Response {
+    data: Document;
+    meta: DocumentMetadata;
     error?: errors.ApplicationError;
   }
 }
@@ -157,37 +215,72 @@ export declare namespace Delete {
  */
 export declare namespace Publish {
   export interface Request {
-    body: {};
-    query: {};
+    body: Partial<Document>;
+    query: {
+      locale?: string | null;
+    };
   }
 
   export interface Params {
     model: string;
-    id: number;
+    documentId: Modules.Documents.ID;
   }
 
   export interface Response {
-    data: Entity;
+    data: Document;
+    meta: DocumentMetadata;
     error?: errors.ApplicationError;
   }
 }
 
 /**
  * POST /collection-types/:model/:id/actions/unpublish
+ *
+ * TODO: Unpublish many locales at once
  */
 export declare namespace Unpublish {
   export interface Request {
-    body: {};
-    query: {};
+    body: {
+      // Discards the draft version before un-publishing, so the document is be reverted to the last published version.
+      // Default: false
+      discardDraft?: boolean;
+    };
+    query: {
+      locale?: string | null;
+    };
   }
 
   export interface Params {
     model: string;
-    id: Entity['id'];
+    documentId: Modules.Documents.ID;
   }
 
   export interface Response {
-    data: Entity;
+    data: Document;
+    meta: DocumentMetadata;
+    error?: errors.ApplicationError;
+  }
+}
+
+/**
+ * POST /collection-types/:model/:id/actions/discard
+ */
+export declare namespace Discard {
+  export interface Request {
+    body: {};
+    query: {
+      locale?: string | null;
+    };
+  }
+
+  export interface Params {
+    model: string;
+    documentId: Modules.Documents.ID;
+  }
+
+  export interface Response {
+    data: Document;
+    meta: DocumentMetadata;
     error?: errors.ApplicationError;
   }
 }
@@ -198,9 +291,11 @@ export declare namespace Unpublish {
 export declare namespace BulkDelete {
   export interface Request {
     body: {
-      ids: Entity['id'][];
+      documentIds: Modules.Documents.ID[];
     };
-    query: {};
+    query: {
+      locale?: string;
+    };
   }
 
   export interface Params {
@@ -221,9 +316,12 @@ export declare namespace BulkDelete {
 export declare namespace BulkPublish {
   export interface Request {
     body: {
-      ids: Entity['id'][];
+      documentIds: Modules.Documents.ID[];
     };
-    query: {};
+    query: {
+      // If not provided, the default locale will be used
+      locale?: string | string[] | null;
+    };
   }
 
   export interface Params {
@@ -231,7 +329,9 @@ export declare namespace BulkPublish {
   }
 
   export interface Response {
-    count: number;
+    data: {
+      count: number;
+    };
     error?: errors.ApplicationError | errors.YupValidationError;
   }
 }
@@ -242,9 +342,12 @@ export declare namespace BulkPublish {
 export declare namespace BulkUnpublish {
   export interface Request {
     body: {
-      ids: Entity['id'][];
+      documentIds: Modules.Documents.ID[];
     };
-    query: {};
+    query: {
+      // If not provided, the default locale will be used
+      locale?: string | string[] | null;
+    };
   }
 
   export interface Params {
@@ -265,7 +368,10 @@ export declare namespace BulkUnpublish {
 export declare namespace CountDraftRelations {
   export interface Request {
     body: {};
-    query: {};
+    query: {
+      // Count the draft relations of one entity, locale + documentId
+      locale?: string | null;
+    };
   }
 
   export interface Params {
@@ -273,7 +379,10 @@ export declare namespace CountDraftRelations {
   }
 
   export interface Response {
-    data: number;
+    data: {
+      unpublishedRelations: number;
+      draftM2mLinks: number;
+    };
     error?: errors.ApplicationError;
   }
 }
@@ -283,10 +392,13 @@ export declare namespace CountDraftRelations {
  */
 export declare namespace CountManyEntriesDraftRelations {
   export interface Request {
-    body: {
-      ids: number[];
+    body: {};
+    query: {
+      // We can use this endpoint to count the draft relations across multiple
+      // entities (documents + locales).
+      documentIds?: Modules.Documents.ID[];
+      locale?: string | string[] | null;
     };
-    query: {};
   }
 
   export interface Params {

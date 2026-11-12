@@ -1,5 +1,5 @@
-import * as _ from 'lodash';
-import { keysDeep, template } from '@strapi/utils';
+import { difference, template as lodashTemplate } from 'lodash';
+import { objects, template } from '@strapi/utils';
 
 import type {
   EmailConfig,
@@ -11,7 +11,7 @@ import type {
 
 const { createStrictInterpolationRegExp } = template;
 
-const getProviderSettings = (): EmailConfig => strapi.config.get('plugin.email');
+const getProviderSettings = (): EmailConfig => strapi.config.get('plugin::email');
 
 const send = async (options: SendOptions) => strapi.plugin('email').provider.send(options);
 
@@ -28,7 +28,8 @@ const sendTemplatedEmail = (
   data: EmailTemplateData
 ) => {
   const attributes = ['subject', 'text', 'html'];
-  const missingAttributes = _.difference(attributes, Object.keys(emailTemplate));
+  const requiredAttributes = ['subject', 'text'];
+  const missingAttributes = difference(requiredAttributes, Object.keys(emailTemplate));
 
   if (missingAttributes.length > 0) {
     throw new Error(
@@ -36,14 +37,14 @@ const sendTemplatedEmail = (
     );
   }
 
-  const allowedInterpolationVariables = keysDeep(data);
+  const allowedInterpolationVariables = objects.keysDeep(data);
   const interpolate = createStrictInterpolationRegExp(allowedInterpolationVariables, 'g');
 
   const templatedAttributes = attributes.reduce(
     (compiled, attribute) =>
       emailTemplate[attribute]
         ? Object.assign(compiled, {
-            [attribute]: _.template(emailTemplate[attribute], {
+            [attribute]: lodashTemplate(emailTemplate[attribute], {
               interpolate,
             })(data),
           })

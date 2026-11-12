@@ -13,7 +13,6 @@ const data = {
 };
 
 const dogModel = {
-  draftAndPublish: false,
   attributes: {
     name: {
       type: 'string',
@@ -31,9 +30,11 @@ const dogModel = {
 const dogs = [
   {
     name: 'Atos',
+    publishedAt: null,
   },
   {
     name: 'Atos',
+    publishedAt: null,
   },
 ];
 
@@ -71,11 +72,11 @@ describe('Migration - unique attribute', () => {
     test('Cannot create a duplicated entry after migration', async () => {
       // remove duplicated values otherwise the migration would fail
       const { body } = await rq({
-        url: `/content-manager/collection-types/api::dog.dog/${data.dogs[0].id}`,
+        url: `/content-manager/collection-types/api::dog.dog/${data.dogs[0].documentId}`,
         method: 'PUT',
         body: { name: 'Nelson' },
       });
-      data.dogs[0] = body;
+      data.dogs[0] = body.data;
 
       // migration
       const schema = await modelsUtils.getContentTypeSchema(dogModel.singularName, { strapi });
@@ -110,8 +111,7 @@ describe('Migration - unique attribute', () => {
         body: { name: data.dogs[0].name },
       });
 
-      expect(res.body).toMatchObject({ name: data.dogs[0].name });
-      data.dogs.push(res.body);
+      expect(res.body.data).toMatchObject({ name: data.dogs[0].name });
     });
   });
 });

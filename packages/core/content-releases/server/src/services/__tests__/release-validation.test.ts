@@ -1,8 +1,12 @@
-import EE from '@strapi/strapi/dist/utils/ee';
 import type { CreateReleaseAction } from '../../../../shared/contracts/release-actions';
 import createReleaseValidationService from '../validation';
 
 const baseStrapiMock = {
+  ee: {
+    features: {
+      get: jest.fn(),
+    },
+  },
   utils: {
     errors: {
       ValidationError: jest.fn(),
@@ -11,19 +15,13 @@ const baseStrapiMock = {
   contentType: jest.fn(),
 };
 
-jest.mock('@strapi/strapi/dist/utils/ee', () => ({
-  features: {
-    get: jest.fn(),
-  },
-}));
-
 describe('Release Validation service', () => {
-  describe('validateEntryContentType', () => {
+  describe('validateEntryData', () => {
     it('throws an error if the content type does not exist', () => {
       // @ts-expect-error Ignore missing properties
       const releaseValidationService = createReleaseValidationService({ strapi: baseStrapiMock });
 
-      expect(() => releaseValidationService.validateEntryContentType('api::plop.plop')).toThrow(
+      expect(() => releaseValidationService.validateEntryData('api::plop.plop', '1')).toThrow(
         'No content type found for uid api::plop.plop'
       );
     });
@@ -39,15 +37,33 @@ describe('Release Validation service', () => {
       const releaseValidationService = createReleaseValidationService({ strapi: strapiMock });
 
       expect(() =>
-        releaseValidationService.validateEntryContentType('api::category.category')
+        releaseValidationService.validateEntryData('api::category.category', 'collection-types')
       ).toThrow(
         'Content type with uid api::category.category does not have draftAndPublish enabled'
       );
     });
+
+    it('throws an error if is a collection-types and the entryDocumentId is missing', () => {
+      const strapiMock = {
+        ...baseStrapiMock,
+        contentType: jest.fn().mockReturnValue({
+          kind: 'collectionType',
+          options: {
+            draftAndPublish: true,
+          },
+        }),
+      };
+      // @ts-expect-error Ignore missing properties
+      const releaseValidationService = createReleaseValidationService({ strapi: strapiMock });
+
+      expect(() =>
+        releaseValidationService.validateEntryData('api::category.category', '')
+      ).toThrow('Document id is required for collection type');
+    });
   });
 
   describe('validateUniqueEntry', () => {
-    it('throws an error if the release does not exist', () => {
+    it('throws an error if the release does not exist', async () => {
       const strapiMock = {
         ...baseStrapiMock,
         contentType: jest.fn().mockReturnValue({
@@ -55,27 +71,29 @@ describe('Release Validation service', () => {
             draftAndPublish: true,
           },
         }),
-        entityService: {
-          findOne: jest.fn().mockReturnValue(null),
+        db: {
+          query() {
+            return {
+              findOne: jest.fn().mockReturnValue(null),
+            };
+          },
         },
       };
       // @ts-expect-error Ignore missing properties
       const releaseValidationService = createReleaseValidationService({ strapi: strapiMock });
 
       const mockReleaseAction: CreateReleaseAction.Request['body'] = {
-        entry: {
-          id: 1,
-          contentType: 'api::category.category',
-        },
+        entryDocumentId: '1',
+        contentType: 'api::category.category',
         type: 'publish',
       };
 
-      expect(() =>
+      await expect(
         releaseValidationService.validateUniqueEntry(1, mockReleaseAction)
       ).rejects.toThrow('No release found for id 1');
     });
 
-    it('throws an error if a contentType entry already exists in the release', () => {
+    it('throws an error if a contentType entry already exists in the release', async () => {
       const strapiMock = {
         ...baseStrapiMock,
         contentType: jest.fn().mockReturnValue({
@@ -83,42 +101,40 @@ describe('Release Validation service', () => {
             draftAndPublish: true,
           },
         }),
-        entityService: {
-          findOne: jest.fn().mockReturnValue({
-            actions: [
-              {
-                contentType: 'api::category.category',
-                entry: {
-                  id: 1,
-                },
-              },
-            ],
-          }),
+        db: {
+          query() {
+            return {
+              findOne: jest.fn().mockReturnValue({
+                actions: [
+                  {
+                    contentType: 'api::category.category',
+                    entryDocumentId: '1',
+                  },
+                ],
+              }),
+            };
+          },
         },
       };
       // @ts-expect-error Ignore missing properties
       const releaseValidationService = createReleaseValidationService({ strapi: strapiMock });
 
       const mockReleaseAction: CreateReleaseAction.Request['body'] = {
-        entry: {
-          id: 1,
-          contentType: 'api::category.category',
-        },
+        entryDocumentId: '1',
+        contentType: 'api::category.category',
         type: 'publish',
       };
 
-      expect(() =>
+      await expect(
         releaseValidationService.validateUniqueEntry(1, mockReleaseAction)
       ).rejects.toThrow(
-        'Entry with id 1 and contentType api::category.category already exists in release with id 1'
+        'Entry with documentId 1 and contentType api::category.category already exists in release with id 1'
       );
     });
   });
 
   describe('validatePendingReleasesLimit', () => {
-    it('should throw an error if the default pending release limit has been reached', () => {
-      // @ts-expect-error - get is a mock
-      EE.features.get.mockReturnValue({});
+    it('should throw an error if the default pending release limit has been reached', async () => {
       const strapiMock = {
         ...baseStrapiMock,
         db: {
@@ -131,14 +147,12 @@ describe('Release Validation service', () => {
       // @ts-expect-error Ignore missing properties
       const releaseValidationService = createReleaseValidationService({ strapi: strapiMock });
 
-      expect(() => releaseValidationService.validatePendingReleasesLimit()).rejects.toThrow(
+      await expect(releaseValidationService.validatePendingReleasesLimit()).rejects.toThrow(
         'You have reached the maximum number of pending releases'
       );
     });
 
     it('should pass if the default pending release limit has NOT been reached', async () => {
-      // @ts-expect-error - get is a mock
-      EE.features.get.mockReturnValue({});
       const strapiMock = {
         ...baseStrapiMock,
         db: {
@@ -154,15 +168,18 @@ describe('Release Validation service', () => {
       await expect(releaseValidationService.validatePendingReleasesLimit()).resolves.not.toThrow();
     });
 
-    it('should throw an error if the license pending release limit has been reached', () => {
-      // @ts-expect-error - get is a mock
-      EE.features.get.mockReturnValue({
-        options: {
-          maximumReleases: 5,
-        },
-      });
+    it('should throw an error if the license pending release limit has been reached', async () => {
       const strapiMock = {
         ...baseStrapiMock,
+        ee: {
+          features: {
+            get: jest.fn().mockReturnValue({
+              options: {
+                maximumReleases: 5,
+              },
+            }),
+          },
+        },
         db: {
           query: jest.fn().mockReturnValue({
             findWithCount: jest.fn().mockReturnValue([[], 5]),
@@ -172,20 +189,23 @@ describe('Release Validation service', () => {
       // @ts-expect-error Ignore missing properties
       const releaseValidationService = createReleaseValidationService({ strapi: strapiMock });
 
-      expect(() => releaseValidationService.validatePendingReleasesLimit()).rejects.toThrow(
+      await expect(releaseValidationService.validatePendingReleasesLimit()).rejects.toThrow(
         'You have reached the maximum number of pending releases'
       );
     });
 
     it('should pass if the license pending release limit has NOT been reached', async () => {
-      // @ts-expect-error - get is a mock
-      EE.features.get.mockReturnValue({
-        options: {
-          maximumReleases: 5,
-        },
-      });
       const strapiMock = {
         ...baseStrapiMock,
+        ee: {
+          features: {
+            get: jest.fn().mockReturnValue({
+              options: {
+                maximumReleases: 5,
+              },
+            }),
+          },
+        },
         db: {
           query: jest.fn().mockReturnValue({
             findWithCount: jest.fn().mockReturnValue([[], 4]),
@@ -200,16 +220,68 @@ describe('Release Validation service', () => {
     });
   });
 
+  describe('validatePendingReleasesLimit defaults', () => {
+    const createService = (maximumReleases: unknown, pendingReleasesCount: number) => {
+      const strapiMock = {
+        ...baseStrapiMock,
+        ee: {
+          features: {
+            get: jest
+              .fn()
+              .mockReturnValue(
+                maximumReleases === undefined
+                  ? { name: 'cms-content-releases' }
+                  : { name: 'cms-content-releases', options: { maximumReleases } }
+              ),
+          },
+        },
+        db: {
+          query: jest.fn().mockReturnValue({
+            findWithCount: jest.fn().mockReturnValue([[], pendingReleasesCount]),
+          }),
+        },
+      };
+
+      // @ts-expect-error Ignore missing properties
+      return createReleaseValidationService({ strapi: strapiMock });
+    };
+
+    it.each([
+      ['"0"', '0'],
+      ['0', 0],
+      ['missing', undefined],
+      ['non-numeric', 'many'],
+    ])('enforces the default of 3 when the license limit is %s', async (_, maximumReleases) => {
+      await expect(
+        createService(maximumReleases, 2).validatePendingReleasesLimit()
+      ).resolves.not.toThrow();
+      await expect(
+        createService(maximumReleases, 3).validatePendingReleasesLimit()
+      ).rejects.toThrow('You have reached the maximum number of pending releases');
+    });
+
+    it('reads a numeric string limit as its number', async () => {
+      await expect(createService('90', 89).validatePendingReleasesLimit()).resolves.not.toThrow();
+      await expect(createService('90', 90).validatePendingReleasesLimit()).rejects.toThrow(
+        'You have reached the maximum number of pending releases'
+      );
+    });
+  });
+
   describe('validateUniqueNameForPendingRelease', () => {
     it('should throw an error if a release with the same name already exists', async () => {
       const strapiMock = {
         ...baseStrapiMock,
-        entityService: {
-          findMany: jest.fn().mockReturnValue([
-            {
-              name: 'release1',
-            },
-          ]),
+        db: {
+          query() {
+            return {
+              findMany: jest.fn().mockReturnValue([
+                {
+                  name: 'release1',
+                },
+              ]),
+            };
+          },
         },
       };
 
@@ -224,8 +296,10 @@ describe('Release Validation service', () => {
     it('should pass if a release with the same name does NOT already exist', async () => {
       const strapiMock = {
         ...baseStrapiMock,
-        entityService: {
-          findMany: jest.fn().mockReturnValue([]),
+        db: {
+          query() {
+            return { findMany: jest.fn().mockReturnValue([]) };
+          },
         },
       };
 
@@ -247,22 +321,22 @@ describe('Release Validation service', () => {
       jest.useRealTimers();
     });
 
-    it('should throw an error if the scheduledAt date is in the past', () => {
+    it('should throw an error if the scheduledAt date is in the past', async () => {
       // @ts-expect-error Ignore missing properties
       const releaseValidationService = createReleaseValidationService({ strapi: baseStrapiMock });
 
-      expect(() =>
+      await expect(
         releaseValidationService.validateScheduledAtIsLaterThanNow(new Date('2020-01-01'))
       ).rejects.toThrow('Scheduled at must be later than now');
     });
 
-    it('should pass if the scheduledAt date is in the future', () => {
+    it('should pass if the scheduledAt date is in the future', async () => {
       // @ts-expect-error Ignore missing properties
       const releaseValidationService = createReleaseValidationService({ strapi: baseStrapiMock });
 
-      expect(() =>
+      await expect(
         releaseValidationService.validateScheduledAtIsLaterThanNow(new Date('2022-01-01'))
-      ).not.toThrow();
+      ).resolves.toBeUndefined();
     });
   });
 });

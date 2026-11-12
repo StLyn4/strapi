@@ -1,23 +1,17 @@
 import { join } from 'path';
-import { nameToSlug, errors } from '@strapi/utils';
-import type { Schema } from '@strapi/types';
+import { strings, errors } from '@strapi/utils';
+import type { Internal } from '@strapi/types';
 import createBuilder from './schema-builder';
 
 type Infos = {
   name: string;
 };
 
-interface WorkingComponent extends Schema.Component {
-  setUID: (uid: string) => WorkingComponent;
-  setDir: (dir: string) => WorkingComponent;
-  updateComponent: (oldUID: string, newUID: string) => void;
-}
-
 /**
  * Edit a category name and move components to the write folder
  */
 export const editCategory = async (name: string, infos: Infos) => {
-  const newName = nameToSlug(infos.name);
+  const newName = strings.nameToSlug(infos.name);
 
   // don't do anything the name doesn't change
   if (name === newName) return;
@@ -32,20 +26,20 @@ export const editCategory = async (name: string, infos: Infos) => {
 
   const builder = createBuilder();
 
-  builder.components.forEach((component: WorkingComponent) => {
+  builder.components.forEach((component) => {
     const oldUID = component.uid;
-    const newUID = `${newName}.${component.modelName}`;
+    const newUID: Internal.UID.Component = `${newName}.${component.modelName}`;
 
     // only edit the components in this specific category
     if (component.category !== name) return;
 
     component.setUID(newUID).setDir(join(strapi.dirs.app.components, newName));
 
-    builder.components.forEach((compo: WorkingComponent) => {
+    builder.components.forEach((compo) => {
       compo.updateComponent(oldUID, newUID);
     });
 
-    builder.contentTypes.forEach((ct: WorkingComponent) => {
+    builder.contentTypes.forEach((ct) => {
       ct.updateComponent(oldUID, newUID);
     });
   });

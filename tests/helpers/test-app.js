@@ -2,21 +2,16 @@
 
 const path = require('path');
 const fs = require('fs');
-const rimraf = require('rimraf');
+const { rimraf } = require('rimraf');
 const execa = require('execa');
-const generateNew = require('@strapi/generate-new/dist/generate-new');
+const { createStrapi } = require('create-strapi-app');
 
 /**
  * Deletes a test app
  * @param {string} appPath - name of the app / folder where the app is located
  */
-const cleanTestApp = (appPath) => {
-  return new Promise((resolve, reject) => {
-    rimraf(path.resolve(appPath), (err) => {
-      if (err) reject(err);
-      resolve();
-    });
-  });
+const cleanTestApp = async (appPath) => {
+  await rimraf(path.resolve(appPath));
 };
 
 /**
@@ -26,50 +21,48 @@ const cleanTestApp = (appPath) => {
  * @param {database} options.database - Arguments to create the testApp with the provided database params
  */
 const generateTestApp = async ({ appPath, database, template, link = false }) => {
+  const pkg = require(path.resolve(__dirname, '../../packages/core/strapi/package.json'));
+
   const scope = {
     database,
     rootPath: path.resolve(appPath),
     name: path.basename(appPath),
+    packageManager: 'yarn',
     // disable quickstart run app after creation
-    runQuickstartApp: false,
+    runApp: false,
     // use package version as strapiVersion (all packages have the same version);
-    strapiVersion: require(path.resolve(__dirname, '../../packages/core/strapi/package.json'))
-      .version,
-    debug: false,
-    quick: false,
+    strapiVersion: pkg.version,
+    isQuickstart: false,
     uuid: undefined,
     deviceId: null,
-    // use yarn if available and --use-npm isn't true
-    useYarn: true,
     installDependencies: false,
-    strapiDependencies: [
-      '@strapi/strapi',
-      '@strapi/plugin-users-permissions',
-      '@strapi/plugin-graphql',
-      '@strapi/plugin-documentation',
-      '@strapi/plugin-i18n',
-      '@strapi/plugin-cloud',
-    ],
-    additionalsDependencies: {
+    dependencies: {
+      '@strapi/strapi': pkg.version,
+      '@strapi/plugin-users-permissions': pkg.version,
+      '@strapi/plugin-graphql': pkg.version,
+      '@strapi/plugin-documentation': pkg.version,
+      '@strapi/plugin-cloud': pkg.version,
       react: '18.2.0',
       'react-dom': '18.2.0',
-      'react-router-dom': '5.3.4',
-      'styled-components': '5.3.3',
+      'react-router-dom': '^6.0.0',
+      'styled-components': '^6.0.0',
     },
     template: template ? path.resolve(template) : template,
+    gitInit: false,
   };
 
-  await generateNew(scope);
+  await createStrapi(scope);
+
   if (link) {
-    await linkPackages(appPath);
+    await linkPackages(scope);
   }
 };
 
-const linkPackages = async (appPath) => {
-  const rootPath = path.resolve(__dirname, '../..');
-  fs.writeFileSync(path.join(appPath, 'yarn.lock'), '');
-  await execa('yarn', ['link', '-A', rootPath], {
-    cwd: appPath,
+const linkPackages = async (scope) => {
+  fs.writeFileSync(path.join(scope.rootPath, 'yarn.lock'), '');
+
+  await execa('node', [path.join(__dirname, '../..', 'scripts', 'yalc-link.js')], {
+    cwd: scope.rootPath,
     stdio: 'inherit',
   });
 };

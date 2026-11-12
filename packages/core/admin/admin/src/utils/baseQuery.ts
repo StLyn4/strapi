@@ -1,108 +1,116 @@
 import { SerializedError } from '@reduxjs/toolkit';
 import { BaseQueryFn } from '@reduxjs/toolkit/query';
-import { ApiError, getFetchClient } from '@strapi/helper-plugin';
-import { isAxiosError, type AxiosRequestConfig } from 'axios';
 
-/* -------------------------------------------------------------------------------------------------
- * Axios data
- * -----------------------------------------------------------------------------------------------*/
-export interface QueryArguments {
+import {
+  getFailedRequestSessionToken,
+  getFetchClient,
+  triggerSessionExpired,
+  type FetchOptions,
+  ApiError,
+  isFetchError,
+} from '../utils/getFetchClient';
+
+interface QueryArguments {
   url: string;
-  method?: AxiosRequestConfig['method'];
-  data?: AxiosRequestConfig['data'];
-  config?: AxiosRequestConfig;
+  method?: 'GET' | 'POST' | 'DELETE' | 'PUT';
+  data?: unknown;
+  config?: FetchOptions;
 }
 
-export interface UnknownApiError {
+interface UnknownApiError {
   name: 'UnknownError';
   message: string;
   details?: unknown;
   status?: number;
 }
 
-export type BaseQueryError = ApiError | UnknownApiError;
+type BaseQueryError = ApiError | UnknownApiError;
 
-const axiosBaseQuery =
-  (): BaseQueryFn<string | QueryArguments, unknown, BaseQueryError> =>
-  async (query, { signal }) => {
-    try {
-      const { get, post, del, put } = getFetchClient();
+const isAuthPath = (url: string) => /^\/admin\/(login|logout|access-token)\b/.test(url);
 
-      if (typeof query === 'string') {
-        const result = await get(query, { signal });
-        return { data: result.data };
-      } else {
-        const { url, method = 'GET', data, config } = query;
+const simpleQuery: BaseQueryFn<
+  string | QueryArguments,
+  unknown,
+  BaseQueryError | SerializedError
+> = async (query, api) => {
+  const { signal } = api;
 
-        if (method === 'POST') {
-          const result = await post(url, data, { ...config, signal });
-          return { data: result.data };
-        }
-
-        if (method === 'DELETE') {
-          const result = await del(url, { ...config, signal });
-          return { data: result.data };
-        }
-
-        if (method === 'PUT') {
-          const result = await put(url, data, { ...config, signal });
-          return { data: result.data };
-        }
-
-        /**
-         * Default is GET.
-         */
-        const result = await get(url, { ...config, signal });
-        return { data: result.data };
-      }
-    } catch (err) {
-      /**
-       * Handle error of type AxiosError
-       *
-       * This format mimics what we want from an AxiosError which is what the
-       * rest of the app works with, except this format is "serializable" since
-       * it goes into the redux store.
-       *
-       * NOTE – passing the whole response will highlight this "serializability" issue.
-       */
-
-      if (isAxiosError(err)) {
-        if (
-          typeof err.response?.data === 'object' &&
-          err.response?.data !== null &&
-          'error' in err.response?.data
-        ) {
-          /**
-           * This will most likely be ApiError
-           */
-          return { data: undefined, error: err.response?.data.error };
-        } else {
-          return {
-            data: undefined,
-            error: {
-              name: 'UnknownError',
-              message: 'There was an unknown error response from the API',
-              details: err.response?.data,
-              status: err.response?.status,
-            } as UnknownApiError,
-          };
-        }
-      }
-
-      const error = err as Error;
-      return {
-        data: undefined,
-        error: {
-          name: error.name,
-          message: error.message,
-          stack: error.stack,
-        } satisfies SerializedError,
-      };
+  const executeQuery = async (queryToExecute: string | QueryArguments) => {
+    const { get, post, del, put } = getFetchClient();
+    if (typeof queryToExecute === 'string') {
+      const result = await get(queryToExecute, { signal });
+      return result;
     }
+
+    const { url, method = 'GET', data, config } = queryToExecute;
+    if (method === 'POST') {
+      return post(url, data, { ...config, signal });
+    }
+    if (method === 'DELETE') {
+      return del(url, { ...config, signal });
+    }
+    if (method === 'PUT') {
+      return put(url, data, { ...config, signal });
+    }
+    return get(url, { ...config, signal });
   };
+
+  try {
+    const result = await executeQuery(query);
+    return { data: result.data };
+  } catch (err) {
+    // Handle error of type FetchError
+
+    if (isFetchError(err)) {
+      // If we receive a 401 here, getFetchClient already tried to refresh and failed.
+      // Log the user out since their session is no longer valid.
+      if (err.status === 401) {
+        const url = typeof query === 'string' ? query : query.url;
+
+        if (!isAuthPath(url)) {
+          // Defer clearing auth state to AuthProvider so unsaved-change guards
+          // can run before token removal (which unmounts edit forms).
+          triggerSessionExpired(getFailedRequestSessionToken(err));
+        }
+      }
+
+      const responseData = err.response?.data;
+
+      if (typeof responseData === 'object' && responseData !== null && 'error' in responseData) {
+        /**
+         * This will most likely be ApiError
+         */
+        return { data: undefined, error: responseData.error as BaseQueryError };
+      } else {
+        return {
+          data: undefined,
+          error: {
+            name: 'UnknownError',
+            message: err.message,
+            details: err.response,
+            status: err.status,
+          } as UnknownApiError,
+        };
+      }
+    }
+
+    const error = err instanceof Error ? err : new Error('Unknown error');
+    return {
+      data: undefined,
+      error: {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      } satisfies SerializedError,
+    };
+  }
+};
+
+const fetchBaseQuery = () => simpleQuery;
 
 const isBaseQueryError = (error: BaseQueryError | SerializedError): error is BaseQueryError => {
   return error.name !== undefined;
 };
 
-export { axiosBaseQuery, isBaseQueryError };
+export { fetchBaseQuery, isBaseQueryError };
+export type { BaseQueryError, UnknownApiError, QueryArguments };

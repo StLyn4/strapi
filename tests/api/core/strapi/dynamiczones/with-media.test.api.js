@@ -94,7 +94,7 @@ describe('Not required dynamiczone', () => {
     test('The medias are correctly related to the components on creation', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -119,46 +119,36 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(Array.isArray(res.body.data.attributes.field)).toBe(true);
+      expect(res.statusCode).toBe(201);
+      expect(Array.isArray(res.body.data.field)).toBe(true);
       expect(res.body.data).toMatchObject({
-        attributes: {
-          field: [
-            {
-              id: expect.anything(),
-              __component: 'default.one-media',
-              media: {
-                data: {
-                  id: mediaId,
-                  attributes: expect.objectContaining({
-                    url: expect.any(String),
-                  }),
-                },
-              },
+        field: [
+          {
+            id: expect.anything(),
+            __component: 'default.one-media',
+            media: {
+              id: mediaId,
+              url: expect.any(String),
             },
-            {
-              id: expect.anything(),
-              __component: 'default.many-media',
-              media: {
-                data: expect.arrayContaining([
-                  expect.objectContaining({
-                    id: mediaId,
-                    attributes: expect.objectContaining({
-                      url: expect.any(String),
-                    }),
-                  }),
-                ]),
+          },
+          {
+            id: expect.anything(),
+            __component: 'default.many-media',
+            media: [
+              {
+                id: mediaId,
+                url: expect.any(String),
               },
-            },
-          ],
-        },
+            ],
+          },
+        ],
       });
     });
 
     test('The medias are correctly related to the components on edition', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -183,16 +173,16 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(Array.isArray(res.body.data.attributes.field)).toBe(true);
+      expect(res.statusCode).toBe(201);
+      expect(Array.isArray(res.body.data.field)).toBe(true);
 
       const newImgRes = await uploadImg();
 
-      expect(newImgRes.statusCode).toBe(200);
+      expect(newImgRes.statusCode).toBe(201);
       const newMediaId = newImgRes.body[0].id;
       const updateRes = await rq({
         method: 'PUT',
-        url: `/${res.body.data.id}`,
+        url: `/${res.body.data.documentId}`,
         body: {
           data: {
             field: [
@@ -213,43 +203,33 @@ describe('Not required dynamiczone', () => {
       });
 
       expect(updateRes.body.data).toMatchObject({
-        attributes: {
-          field: [
-            {
-              id: expect.anything(),
-              __component: 'default.one-media',
-              media: {
-                data: {
-                  id: newMediaId,
-                  attributes: expect.objectContaining({
-                    url: expect.any(String),
-                  }),
-                },
-              },
+        field: [
+          {
+            id: expect.anything(),
+            __component: 'default.one-media',
+            media: {
+              id: newMediaId,
+              url: expect.any(String),
             },
-            {
-              id: expect.anything(),
-              __component: 'default.many-media',
-              media: {
-                data: expect.arrayContaining([
-                  expect.objectContaining({
-                    id: newMediaId,
-                    attributes: expect.objectContaining({
-                      url: expect.any(String),
-                    }),
-                  }),
-                ]),
+          },
+          {
+            id: expect.anything(),
+            __component: 'default.many-media',
+            media: [
+              {
+                id: newMediaId,
+                url: expect.any(String),
               },
-            },
-          ],
-        },
+            ],
+          },
+        ],
       });
     });
 
     test('The media are populated on the components', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -274,47 +254,37 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
 
       const getRes = await rq({
         method: 'GET',
-        url: `/${res.body.data.id}`,
+        url: `/${res.body.data.documentId}`,
         qs: {
           populate: ['field.media'],
         },
       });
 
       expect(getRes.body.data).toMatchObject({
-        attributes: {
-          field: [
-            {
-              id: expect.anything(),
-              __component: 'default.one-media',
-              media: {
-                data: {
-                  id: mediaId,
-                  attributes: expect.objectContaining({
-                    url: expect.any(String),
-                  }),
-                },
-              },
+        field: [
+          {
+            id: expect.anything(),
+            __component: 'default.one-media',
+            media: {
+              id: mediaId,
+              url: expect.any(String),
             },
-            {
-              id: expect.anything(),
-              __component: 'default.many-media',
-              media: {
-                data: expect.arrayContaining([
-                  expect.objectContaining({
-                    id: mediaId,
-                    attributes: expect.objectContaining({
-                      url: expect.any(String),
-                    }),
-                  }),
-                ]),
+          },
+          {
+            id: expect.anything(),
+            __component: 'default.many-media',
+            media: [
+              {
+                id: mediaId,
+                url: expect.any(String),
               },
-            },
-          ],
-        },
+            ],
+          },
+        ],
       });
     });
   });
@@ -323,7 +293,7 @@ describe('Not required dynamiczone', () => {
     test('The medias are correctly related to the nested components on creation', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -349,39 +319,29 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(Array.isArray(res.body.data.attributes.field)).toBe(true);
+      expect(res.statusCode).toBe(201);
+      expect(Array.isArray(res.body.data.field)).toBe(true);
       expect(res.body.data).toMatchObject({
-        attributes: {
-          field: [
-            {
-              id: expect.anything(),
-              __component: 'default.with-nested',
-              singleMedia: {
-                media: {
-                  data: {
-                    id: mediaId,
-                    attributes: expect.objectContaining({
-                      url: expect.any(String),
-                    }),
-                  },
-                },
-              },
-              multipleMedia: {
-                media: {
-                  data: expect.arrayContaining([
-                    expect.objectContaining({
-                      id: mediaId,
-                      attributes: expect.objectContaining({
-                        url: expect.any(String),
-                      }),
-                    }),
-                  ]),
-                },
+        field: [
+          {
+            id: expect.anything(),
+            __component: 'default.with-nested',
+            singleMedia: {
+              media: {
+                id: mediaId,
+                url: expect.any(String),
               },
             },
-          ],
-        },
+            multipleMedia: {
+              media: [
+                {
+                  id: mediaId,
+                  url: expect.any(String),
+                },
+              ],
+            },
+          },
+        ],
       });
     });
   });

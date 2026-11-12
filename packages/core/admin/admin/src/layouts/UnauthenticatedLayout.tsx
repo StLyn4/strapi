@@ -1,18 +1,27 @@
 import * as React from 'react';
 
-import { Box, Flex, SingleSelect, SingleSelectOption } from '@strapi/design-system';
+import {
+  Box,
+  BoxComponent,
+  Flex,
+  FlexComponent,
+  SingleSelect,
+  SingleSelectOption,
+} from '@strapi/design-system';
 import { useIntl } from 'react-intl';
-import styled from 'styled-components';
+import { styled } from 'styled-components';
 
+import { RESPONSIVE_DEFAULT_SPACING } from '../constants/theme';
 import { useTypedDispatch, useTypedSelector } from '../core/store/hooks';
 import { setLocale } from '../reducer';
 
-const Wrapper = styled(Box)`
+const Wrapper = styled<BoxComponent>(Box)`
   margin: 0 auto;
-  width: 552px;
+  width: 100%;
+  max-width: 55.2rem;
 `;
 
-export const Column = styled(Flex)`
+export const Column = styled<FlexComponent>(Flex)`
   flex-direction: column;
 `;
 
@@ -49,10 +58,10 @@ export const LayoutContent = ({ children }: LayoutContentProps) => (
   <Wrapper
     shadow="tableShadow"
     hasRadius
-    paddingTop={9}
-    paddingBottom={9}
-    paddingLeft={10}
-    paddingRight={10}
+    paddingTop={RESPONSIVE_DEFAULT_SPACING}
+    paddingBottom={RESPONSIVE_DEFAULT_SPACING}
+    paddingLeft={RESPONSIVE_DEFAULT_SPACING}
+    paddingRight={RESPONSIVE_DEFAULT_SPACING}
     background="neutral0"
   >
     {children}
@@ -66,12 +75,17 @@ interface UnauthenticatedLayoutProps {
 export const UnauthenticatedLayout = ({ children }: UnauthenticatedLayoutProps) => {
   return (
     <div>
-      <Flex as="header" justifyContent="flex-end">
-        <Box paddingTop={6} paddingRight={8}>
+      <Flex tag="header" justifyContent="flex-end">
+        <Box paddingTop={6} paddingRight={RESPONSIVE_DEFAULT_SPACING}>
           <LocaleToggle />
         </Box>
       </Flex>
-      <Box paddingTop={2} paddingBottom={11}>
+      <Box
+        paddingTop={2}
+        paddingBottom={RESPONSIVE_DEFAULT_SPACING}
+        marginLeft={RESPONSIVE_DEFAULT_SPACING}
+        marginRight={RESPONSIVE_DEFAULT_SPACING}
+      >
         {children}
       </Box>
     </div>

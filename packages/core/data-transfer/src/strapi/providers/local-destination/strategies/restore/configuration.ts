@@ -1,28 +1,34 @@
 import { Writable } from 'stream';
-import { omit } from 'lodash/fp';
+import { omit } from 'lodash';
 import chalk from 'chalk';
-import type { LoadedStrapi } from '@strapi/types';
+import type { Core } from '@strapi/types';
 import { ProviderTransferError } from '../../../../../errors/providers';
-import { IConfiguration, Transaction } from '../../../../../../types';
+import { IConfiguration, Transaction } from '../../../../../types';
+import { restoreProjectSettingsRow } from '../../../../utils/project-settings-logos';
 
-const omitInvalidCreationAttributes = omit(['id']);
+const omitInvalidCreationAttributes = <T extends object>(data: T) => omit(data, ['id']);
 
-const restoreCoreStore = async <T extends { value: unknown }>(strapi: LoadedStrapi, values: T) => {
+const restoreCoreStore = async <T extends { value: unknown }>(strapi: Core.Strapi, values: T) => {
   const data = omitInvalidCreationAttributes(values);
+  const row = await restoreProjectSettingsRow(
+    strapi,
+    data as unknown as { key: string; value: unknown }
+  );
+
   return strapi.db.query('strapi::core-store').create({
     data: {
-      ...data,
-      value: JSON.stringify(data.value),
+      ...row,
+      value: JSON.stringify(row.value),
     },
   });
 };
 
-const restoreWebhooks = async <T extends { value: unknown }>(strapi: LoadedStrapi, values: T) => {
+const restoreWebhooks = async <T extends { value: unknown }>(strapi: Core.Strapi, values: T) => {
   const data = omitInvalidCreationAttributes(values);
-  return strapi.db.query('webhook').create({ data });
+  return strapi.db.query('strapi::webhook').create({ data });
 };
 
-export const restoreConfigs = async (strapi: LoadedStrapi, config: IConfiguration) => {
+export const restoreConfigs = async (strapi: Core.Strapi, config: IConfiguration) => {
   if (config.type === 'core-store') {
     return restoreCoreStore(strapi, config.value as { value: unknown });
   }
@@ -33,7 +39,7 @@ export const restoreConfigs = async (strapi: LoadedStrapi, config: IConfiguratio
 };
 
 export const createConfigurationWriteStream = async (
-  strapi: LoadedStrapi,
+  strapi: Core.Strapi,
   transaction?: Transaction
 ) => {
   return new Writable({
@@ -51,7 +57,7 @@ export const createConfigurationWriteStream = async (
             new ProviderTransferError(
               `Failed to import ${chalk.yellowBright(config.type)} (${chalk.greenBright(
                 config.value.id
-              )}`
+              )}): ${error instanceof Error ? error.message : String(error)}`
             )
           );
         }

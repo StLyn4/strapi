@@ -1,13 +1,11 @@
+import _ from 'lodash';
 import type { Context } from 'koa';
 
 import path from 'path';
 
-import { map, values, sumBy, pipe, flatMap, propEq } from 'lodash/fp';
-import _ from 'lodash';
 import { exists } from 'fs-extra';
-import '@strapi/types';
 import { env } from '@strapi/utils';
-import tsUtils from '@strapi/typescript-utils';
+import type { Struct } from '@strapi/types';
 import {
   validateUpdateProjectSettings,
   validateUpdateProjectSettingsFiles,
@@ -18,23 +16,38 @@ import { getService } from '../utils';
 import type {
   Init,
   GetProjectSettings,
+  GetProjectType,
   Information,
   Plugins,
   TelemetryProperties,
   UpdateProjectSettings,
+  GetGuidedTourMeta,
+  DebugDump,
 } from '../../../shared/contracts/admin';
 
-const { isUsingTypeScript } = tsUtils;
-
-/* TODO extend the request in this way once Replace is available
-  type FileRequest = Context['request'] & { file: unknown };
-  type FileContext = Replace<Context, { request: FileRequest }>;
-*/
-declare module 'koa' {
-  interface Request {
-    files: unknown;
+// Lazy: only resolved on first GET /admin/project-type request
+type TsUtilsModule = typeof import('@strapi/typescript-utils');
+let lazyTsUtils: TsUtilsModule | undefined;
+const isUsingTypeScript: TsUtilsModule['isUsingTypeScript'] = (
+  ...args: Parameters<TsUtilsModule['isUsingTypeScript']>
+) => {
+  if (!lazyTsUtils) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    lazyTsUtils = require('@strapi/typescript-utils');
   }
-}
+  return (lazyTsUtils as TsUtilsModule).isUsingTypeScript(...args);
+};
+
+// Core plugins are always enabled, so they are omitted from the plugins list.
+const CORE_PLUGINS = new Set([
+  'content-manager',
+  'content-type-builder',
+  'email',
+  'upload',
+  'i18n',
+  'content-releases',
+  'review-workflows',
+]);
 
 /**
  * A set of functions called "actions" for `Admin`
@@ -46,9 +59,9 @@ export default {
 
   // NOTE: admin/ee/server overrides this controller, and adds the EE features
   // This returns an empty feature list for CE
-  async getProjectType() {
+  async getProjectType(): Promise<GetProjectType.Response> {
     const flags = strapi.config.get('admin.flags', {});
-    return { data: { isEE: false, features: [], flags } };
+    return { data: { isEE: false, isTrial: false, features: [], flags, ai: { enabled: false } } };
   },
 
   async init() {
@@ -74,11 +87,13 @@ export default {
       },
     } satisfies Init.Response;
   },
+
   async getProjectSettings() {
     return getService(
       'project-settings'
     ).getProjectSettings() satisfies Promise<GetProjectSettings.Response>;
   },
+
   async updateProjectSettings(ctx: Context) {
     const {
       request: { files, body },
@@ -97,6 +112,7 @@ export default {
       ...formatedFiles,
     }) satisfies Promise<UpdateProjectSettings.Response>;
   },
+
   async telemetryProperties(ctx: Context) {
     // If the telemetry is disabled, ignore the request and return early
     if (strapi.telemetry.isDisabled) {
@@ -114,12 +130,20 @@ export default {
     const numberOfComponents = _.size(strapi.components);
 
     const getNumberOfDynamicZones = () => {
-      return pipe(
-        map('attributes'),
-        flatMap(values),
-        // @ts-expect-error lodash types
-        sumBy(propEq('type', 'dynamiczone'))
-      )(strapi.contentTypes as any);
+      return Object.values(strapi.contentTypes)
+        .flatMap((contentType: Struct.ContentTypeSchema) => Object.values(contentType.attributes))
+        .filter((attribute) => attribute.type === 'dynamiczone').length;
+    };
+
+    const getNumberOfFolders = async (): Promise<number> => {
+      try {
+        const contentStructure = strapi.get('content-structure') as
+          { countGroups?: () => Promise<number> } | undefined;
+
+        return (await contentStructure?.countGroups?.()) ?? 0;
+      } catch {
+        return 0;
+      }
     };
 
     return {
@@ -130,9 +154,11 @@ export default {
         numberOfAllContentTypes, // TODO: V5: This event should be renamed numberOfContentTypes in V5 as the name is already taken to describe the number of content types using i18n.
         numberOfComponents,
         numberOfDynamicZones: getNumberOfDynamicZones(),
+        numberOfContentTypeFolders: await getNumberOfFolders(),
       },
     } satisfies TelemetryProperties.Response;
   },
+
   async information() {
     const currentEnvironment: string = strapi.config.get('environment');
     const autoReload = strapi.config.get('autoReload', false);
@@ -141,7 +167,6 @@ export default {
     const projectId = strapi.config.get('uuid', null);
     const nodeVersion = process.version;
     const communityEdition = !strapi.EE;
-    // @ts-expect-error replace use of exists
     const useYarn: boolean = await exists(path.join(process.cwd(), 'yarn.lock'));
 
     return {
@@ -157,16 +182,44 @@ export default {
       },
     } satisfies Information.Response;
   },
+
+  async debugDump() {
+    const data = await getService('debug-dump').generate();
+
+    return { data } satisfies DebugDump.Response;
+  },
+
   async plugins(ctx: Context) {
     const enabledPlugins = strapi.config.get('enabledPlugins') as any;
 
-    const plugins = Object.entries(enabledPlugins).map(([key, plugin]: any) => ({
-      name: plugin.info.name || key,
-      displayName: plugin.info.displayName || plugin.info.name || key,
-      description: plugin.info.description || '',
-      packageName: plugin.info.packageName,
-    }));
+    const plugins = Object.entries(enabledPlugins)
+      .filter(([key]: any) => !CORE_PLUGINS.has(key))
+      .map(([key, plugin]: any) => ({
+        name: plugin.info.name || key,
+        displayName: plugin.info.displayName || plugin.info.name || key,
+        description: plugin.info.description || '',
+        packageName: plugin.info.packageName,
+      }));
 
-    ctx.send({ plugins }) satisfies Plugins.Response;
+    ctx.send({ plugins } satisfies Plugins.Response);
+  },
+
+  async licenseTrialTimeLeft() {
+    const data = await strapi.ee.getTrialEndDate({
+      strapi,
+    });
+
+    return data;
+  },
+
+  async getGuidedTourMeta(ctx: Context) {
+    const isFirstSuperAdminUser = await getService('user').isFirstSuperAdminUser(ctx.state.user.id);
+
+    return {
+      data: {
+        isFirstSuperAdminUser,
+        schemas: strapi.contentTypes,
+      },
+    } satisfies GetGuidedTourMeta.Response;
   },
 };

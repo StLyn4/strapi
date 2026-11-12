@@ -1,12 +1,7 @@
 {
   "extends": "tsconfig/client.json",
   "compilerOptions": {
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "noEmit": true
+    "types": ["@testing-library/jest-dom"]
   },
-  "include": ["_internal", "packup.config.ts"],
-  "compilerOptions": {
-    "outDir": "./dist/cli"
-  }
+  "include": ["_internal"]
 }

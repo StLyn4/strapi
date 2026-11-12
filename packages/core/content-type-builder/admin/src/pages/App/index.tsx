@@ -1,20 +1,26 @@
 /* eslint-disable import/no-default-export */
 /* eslint-disable check-file/filename-naming-convention  */
 /* eslint-disable check-file/no-index */
-import { lazy, Suspense, useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 
-import { Layout } from '@strapi/design-system';
-import { CheckPagePermissions, LoadingIndicatorPage, useGuidedTour } from '@strapi/helper-plugin';
-import { Helmet } from 'react-helmet';
+import { Page, Layouts, useAppInfo, useGuidedTour } from '@strapi/admin/strapi-admin';
+import { useAIAvailability } from '@strapi/admin/strapi-admin/ee';
 import { useIntl } from 'react-intl';
-import { Route, Switch } from 'react-router-dom';
+import { Route, Routes } from 'react-router-dom';
 
+import { Chat } from '../../components/AIChat/Chat';
+import { usePrefetchAIToken } from '../../components/AIChat/hooks/usePrefetchAIToken';
+import { ChatProvider } from '../../components/AIChat/providers/ChatProvider';
+import { AutoReloadOverlayBlockerProvider } from '../../components/AutoReloadOverlayBlocker';
 import { ContentTypeBuilderNav } from '../../components/ContentTypeBuilderNav/ContentTypeBuilderNav';
-import DataManagerProvider from '../../components/DataManagerProvider/DataManagerProvider';
-import { FormModalNavigationProvider } from '../../components/FormModalNavigationProvider/FormModalNavigationProvider';
+import { CTBSessionProvider } from '../../components/CTBSession/CTBSessionProvider';
+import DataManagerProvider from '../../components/DataManager/DataManagerProvider';
+import { ExitPrompt } from '../../components/ExitPrompt';
+import { FormModal } from '../../components/FormModal/FormModal';
+import { FormModalNavigationProvider } from '../../components/FormModalNavigation/FormModalNavigationProvider';
 import { PERMISSIONS } from '../../constants';
 import { pluginId } from '../../pluginId';
-import { RecursivePath } from '../RecursivePath/RecursivePath';
+import { EmptyState } from '../ListView/EmptyState';
 
 const ListView = lazy(() => import('../ListView/ListView'));
 
@@ -24,40 +30,59 @@ const App = () => {
     id: `${pluginId}.plugin.name`,
     defaultMessage: 'Content Types Builder',
   });
-  const { startSection } = useGuidedTour();
-  const startSectionRef = useRef(startSection);
 
+  const autoReload = useAppInfo('DataManagerProvider', (state) => state.autoReload);
+  const isAIEnabled = useAIAvailability();
+  const state = useGuidedTour('ContentTypeBuilderApp', (s) => s.state);
+  const dispatch = useGuidedTour('ContentTypeBuilderApp', (s) => s.dispatch);
+
+  usePrefetchAIToken();
+
+  // Set tour type based on AI availability when the app loads
   useEffect(() => {
-    if (startSectionRef.current) {
-      startSectionRef.current('contentTypeBuilder');
+    const tourType = isAIEnabled ? 'ContentTypeBuilderAI' : 'ContentTypeBuilderNoAI';
+    const currentTourType = state.tours.contentTypeBuilder.tourType;
+
+    if (currentTourType !== tourType) {
+      dispatch({
+        type: 'set_tour_type',
+        payload: { tourName: 'contentTypeBuilder', tourType },
+      });
     }
-  }, []);
+  }, [isAIEnabled, state.tours.contentTypeBuilder.tourType, dispatch]);
 
   return (
-    <CheckPagePermissions permissions={PERMISSIONS.main}>
-      <Helmet title={title} />
-      <FormModalNavigationProvider>
-        {/* eslint-disable-next-line @typescript-eslint/ban-ts-comment */}
-        {/* @ts-ignore */}
-        <DataManagerProvider>
-          <Layout sideNav={<ContentTypeBuilderNav />}>
-            <Suspense fallback={<LoadingIndicatorPage />}>
-              <Switch>
-                <Route
-                  path={`/plugins/${pluginId}/content-types/create-content-type`}
-                  component={ListView}
-                />
-                <Route path={`/plugins/${pluginId}/content-types/:uid`} component={ListView} />
-                <Route
-                  path={`/plugins/${pluginId}/component-categories/:categoryUid`}
-                  component={RecursivePath}
-                />
-              </Switch>
-            </Suspense>
-          </Layout>
-        </DataManagerProvider>
-      </FormModalNavigationProvider>
-    </CheckPagePermissions>
+    <Page.Protect permissions={PERMISSIONS.main}>
+      <Page.Title>{title}</Page.Title>
+      <AutoReloadOverlayBlockerProvider>
+        <CTBSessionProvider>
+          <FormModalNavigationProvider>
+            <DataManagerProvider>
+              <ExitPrompt />
+              <ChatProvider>
+                <>
+                  {autoReload && <FormModal />}
+                  <Layouts.Root sideNav={<ContentTypeBuilderNav />}>
+                    <Suspense fallback={<Page.Loading />}>
+                      <Routes>
+                        <Route path="content-types/create-content-type" element={<EmptyState />} />
+                        <Route path="content-types/:contentTypeUid" element={<ListView />} />
+                        <Route
+                          path={`component-categories/:categoryUid/:componentUid`}
+                          element={<ListView />}
+                        />
+                        <Route path="*" element={<ListView />} />
+                      </Routes>
+                    </Suspense>
+                  </Layouts.Root>
+                  <Chat />
+                </>
+              </ChatProvider>
+            </DataManagerProvider>
+          </FormModalNavigationProvider>
+        </CTBSessionProvider>
+      </AutoReloadOverlayBlockerProvider>
+    </Page.Protect>
   );
 };
 

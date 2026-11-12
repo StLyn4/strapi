@@ -1,14 +1,14 @@
-import { errors } from '@strapi/utils';
+import { errors, sanitize } from '@strapi/utils';
 import controller from '../locales';
 import localeModel from '../../content-types/locale';
 
 const { ApplicationError } = errors;
 
-const sanitizers = {
-  get() {
-    return [];
-  },
-} as any;
+const contentAPI = {
+  sanitize: sanitize.createAPISanitizers({
+    getModel: jest.fn(() => {}),
+  } as any),
+};
 
 describe('Locales', () => {
   describe('listLocales', () => {
@@ -30,7 +30,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = {};
@@ -68,7 +68,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = {
@@ -80,7 +80,10 @@ describe('Locales', () => {
       expect(setIsDefault).toHaveBeenCalledWith(locale);
       expect(setDefaultLocale).toHaveBeenCalledWith(locale);
       expect(findByCode).toHaveBeenCalledWith('af');
-      expect(create).toHaveBeenCalledWith({ createdBy: 1, updatedBy: 1, ...locale });
+      expect(create).toHaveBeenCalledWith(
+        { createdBy: 1, updatedBy: 1, ...locale },
+        { isDefault: true }
+      );
       expect(ctx.body).toMatchObject(expectedLocales);
     });
 
@@ -107,7 +110,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = {
@@ -118,7 +121,10 @@ describe('Locales', () => {
 
       expect(setIsDefault).toHaveBeenCalledWith(locale);
       expect(findByCode).toHaveBeenCalledWith('af');
-      expect(create).toHaveBeenCalledWith({ createdBy: 1, updatedBy: 1, ...locale });
+      expect(create).toHaveBeenCalledWith(
+        { createdBy: 1, updatedBy: 1, ...locale },
+        { isDefault: false }
+      );
       expect(ctx.body).toMatchObject(expectedLocale);
     });
 
@@ -145,7 +151,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = {
@@ -193,7 +199,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = {
@@ -235,7 +241,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = {
@@ -258,6 +264,48 @@ describe('Locales', () => {
       expect(setIsDefault).not.toHaveBeenCalled();
       expect(setDefaultLocale).not.toHaveBeenCalled();
     });
+
+    test.each([true, false])(
+      'returns not found when the locale disappears before the update (isDefault: %s)',
+      async (isDefault) => {
+        const existingLocale = { name: 'Afrikaans (af)', code: 'af' };
+        const setDefaultLocale = jest.fn(() => Promise.resolve());
+        const setIsDefault = jest.fn((locale) => locale);
+        const findById = jest.fn(() => existingLocale);
+        const update = jest.fn(() => Promise.resolve(null));
+        const getModel = jest.fn(() => localeModel.schema);
+        global.strapi = {
+          getModel,
+          plugins: {
+            i18n: {
+              services: {
+                locales: {
+                  findById,
+                  setIsDefault,
+                  setDefaultLocale,
+                  update,
+                },
+              },
+            },
+          },
+          contentAPI,
+        } as any;
+
+        const notFound = jest.fn();
+        const ctx: any = {
+          params: { id: 1 },
+          request: { body: { name: 'Afrikaans', isDefault } },
+          state: { user: { id: 1 } },
+          notFound,
+        };
+        await controller.updateLocale(ctx, async () => {});
+
+        expect(update).toHaveBeenCalledWith({ id: 1 }, { updatedBy: 1, name: 'Afrikaans' });
+        expect(notFound).toHaveBeenCalledWith('locale.notFound');
+        expect(setDefaultLocale).not.toHaveBeenCalled();
+        expect(setIsDefault).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe('deleteLocale', () => {
@@ -284,7 +332,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = { params: { id: 1 } };
@@ -318,7 +366,7 @@ describe('Locales', () => {
             },
           },
         },
-        sanitizers,
+        contentAPI,
       } as any;
 
       const ctx: any = { params: { id: 1 } };

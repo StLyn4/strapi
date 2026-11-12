@@ -1,14 +1,14 @@
+import { StrapiAppContextValue } from '@strapi/admin/strapi-admin';
 import { Flex, Typography } from '@strapi/design-system';
 import upperFirst from 'lodash/upperFirst';
 import { useIntl } from 'react-intl';
 
 import { getTrad } from '../utils';
 
-import type { SchemaType } from '../types';
-import type { CustomField } from '@strapi/helper-plugin';
+import type { Struct } from '@strapi/types';
 
 type ModalTitleProps = {
-  forTarget?: SchemaType;
+  forTarget?: Struct.ModelType;
   step?: string;
   kind?: string;
   modalType?: string;
@@ -49,12 +49,12 @@ export const getModalTitleSubHeader = ({
 type FormModalSubHeaderProps = {
   actionType: string;
   modalType: string;
-  forTarget: SchemaType;
+  forTarget: Struct.ModelType;
   kind?: string;
   step?: string;
   attributeType: string;
   attributeName: string;
-  customField?: CustomField;
+  customField?: ReturnType<StrapiAppContextValue['customFields']['get']>;
 };
 
 export const FormModalSubHeader = ({
@@ -74,8 +74,8 @@ export const FormModalSubHeader = ({
       : { id: getTrad(`attribute.${attributeType}`) };
 
   return (
-    <Flex direction="column" alignItems="flex-start" paddingBottom={2} gap={1}>
-      <Typography as="h2" variant="beta">
+    <Flex direction="column" alignItems="flex-start" paddingBottom={1} gap={1}>
+      <Typography tag="h2" variant="beta">
         {formatMessage(
           {
             id: getModalTitleSubHeader({

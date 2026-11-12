@@ -1,27 +1,26 @@
-import { yup, validateYupSchema } from '@strapi/utils';
+import { z } from '@strapi/utils';
+import { validateZodAsync, strapiID } from '../../validation/zod';
 
-const validateFindAvailableSchema = yup
-  .object()
-  .shape({
-    component: yup.string(),
-    entityId: yup.strapiID(),
-    _q: yup.string(),
-    idsToOmit: yup.array().of(yup.strapiID()),
-    idsToInclude: yup.array().of(yup.strapiID()),
-    page: yup.number().integer().min(1),
-    pageSize: yup.number().integer().min(1).max(100),
-  })
-  .required();
+const validateFindAvailableSchema = z.object({
+  component: z.string().optional(),
+  id: strapiID.optional(),
+  _q: z.string().optional(),
+  idsToOmit: z.array(strapiID).optional(),
+  idsToInclude: z.array(strapiID).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+  locale: z.string().nullable().optional(),
+  status: z.enum(['published', 'draft']).nullable().optional(),
+});
 
-const validateFindExistingSchema = yup
-  .object()
-  .shape({
-    page: yup.number().integer().min(1),
-    pageSize: yup.number().integer().min(1).max(100),
-  })
-  .required();
+const validateFindExistingSchema = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+  locale: z.string().nullable().optional(),
+  status: z.enum(['published', 'draft']).nullable().optional(),
+});
 
-const validateFindAvailable = validateYupSchema(validateFindAvailableSchema, { strict: false });
-const validateFindExisting = validateYupSchema(validateFindExistingSchema, { strict: false });
+const validateFindAvailable = validateZodAsync(validateFindAvailableSchema);
+const validateFindExisting = validateZodAsync(validateFindExistingSchema);
 
 export { validateFindAvailable, validateFindExisting };

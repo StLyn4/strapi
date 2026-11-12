@@ -96,7 +96,7 @@ describe('Not required dynamiczone', () => {
     test('The medias are correctly related to the components on creation', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -119,9 +119,9 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(Array.isArray(res.body.field)).toBe(true);
-      expect(res.body).toMatchObject({
+      expect(res.statusCode).toBe(201);
+      expect(Array.isArray(res.body.data.field)).toBe(true);
+      expect(res.body.data).toMatchObject({
         field: [
           {
             id: expect.anything(),
@@ -148,7 +148,7 @@ describe('Not required dynamiczone', () => {
     test('The medias are correctly related to the components on edition', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -171,16 +171,16 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(Array.isArray(res.body.field)).toBe(true);
+      expect(res.statusCode).toBe(201);
+      expect(Array.isArray(res.body.data.field)).toBe(true);
 
       const newImgRes = await uploadImg();
 
-      expect(newImgRes.statusCode).toBe(200);
+      expect(newImgRes.statusCode).toBe(201);
       const newMediaId = newImgRes.body[0].id;
       const updateRes = await rq({
         method: 'PUT',
-        url: `/${res.body.id}`,
+        url: `/${res.body.data.documentId}`,
         body: {
           field: [
             {
@@ -198,7 +198,7 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(updateRes.body).toMatchObject({
+      expect(updateRes.body.data).toMatchObject({
         field: [
           {
             id: expect.anything(),
@@ -225,7 +225,7 @@ describe('Not required dynamiczone', () => {
     test('The media are populated on the components', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -248,17 +248,17 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
 
       const getRes = await rq({
         method: 'GET',
-        url: `/${res.body.id}`,
+        url: `/${res.body.data.documentId}`,
         qs: {
           populate: ['field'],
         },
       });
 
-      expect(getRes.body).toMatchObject({
+      expect(getRes.body.data).toMatchObject({
         field: [
           {
             id: expect.anything(),
@@ -287,7 +287,7 @@ describe('Not required dynamiczone', () => {
     test('The medias are correctly related to the nested components on creation', async () => {
       const imgRes = await uploadImg();
 
-      expect(imgRes.statusCode).toBe(200);
+      expect(imgRes.statusCode).toBe(201);
       const mediaId = imgRes.body[0].id;
 
       const res = await rq({
@@ -311,9 +311,9 @@ describe('Not required dynamiczone', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(Array.isArray(res.body.field)).toBe(true);
-      expect(res.body).toMatchObject({
+      expect(res.statusCode).toBe(201);
+      expect(Array.isArray(res.body.data.field)).toBe(true);
+      expect(res.body.data).toMatchObject({
         field: [
           {
             id: expect.anything(),

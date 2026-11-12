@@ -1,14 +1,16 @@
-import type { IncomingMessage } from 'http';
+import type { IncomingMessage } from 'node:http';
 import { randomUUID } from 'crypto';
 import type { Context } from 'koa';
 import type { RawData, ServerOptions } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 
 import type { Handler, TransferState } from './abstract';
-import type { Protocol } from '../../../../types';
+import type { Protocol } from '../../../types';
 import { ProviderError, ProviderTransferError } from '../../../errors/providers';
 import { VALID_TRANSFER_COMMANDS, ValidTransferCommand } from './constants';
 import { TransferMethod } from '../constants';
+import { createDiagnosticReporter } from '../../../utils/diagnostic';
+import { stringifyTransferWebSocketPayload } from '../../../utils/transfer-websocket-json';
 
 type WSCallback = (client: WebSocket, request: IncomingMessage) => void;
 
@@ -23,9 +25,14 @@ export const transformUpgradeHeader = (header = '') => {
 
 let timeouts: Record<string, number> | undefined;
 
+const hasHttpServer = () => {
+  // during server restarts, strapi may not have ever been defined at all, so we have to check it first
+  return typeof strapi !== 'undefined' && !!strapi?.server?.httpServer;
+};
+
 // temporarily disable server timeouts while transfer is running
 const disableTimeouts = () => {
-  if (!strapi?.server?.httpServer) {
+  if (!hasHttpServer()) {
     return;
   }
 
@@ -45,7 +52,7 @@ const disableTimeouts = () => {
   strapi.log.info('[Data transfer] Disabling http timeouts');
 };
 const resetTimeouts = () => {
-  if (!strapi?.server?.httpServer || !timeouts) {
+  if (!hasHttpServer() || !timeouts) {
     return;
   }
 
@@ -120,6 +127,8 @@ export const handleWSUpgrade = (wss: WebSocketServer, ctx: Context, callback: WS
     }
 
     disableTimeouts();
+    strapi.db.lifecycles.disable();
+    strapi.log.info('[Data transfer] Disabling lifecycle hooks');
 
     // Create a connection between the client & the server
     wss.emit('connection', client, ctx.req);
@@ -138,12 +147,13 @@ export const handlerControllerFactory =
   (options: HandlerOptions) => {
     const { verify, server: serverOptions } = options ?? {};
 
-    const wss = new WebSocket.Server({ ...serverOptions, noServer: true });
+    const wss = new WebSocketServer({ ...serverOptions, noServer: true });
 
     return async (ctx: Context) => {
       const cb: WSCallback = (ws) => {
         const state: TransferState = { id: undefined };
         const messageUUIDs = new Set<string>();
+        const diagnostics = createDiagnosticReporter();
 
         const cannotRespondHandler = (err: unknown) => {
           strapi?.log?.error(
@@ -153,7 +163,7 @@ export const handlerControllerFactory =
           try {
             ws.terminate();
             ctx.req.socket.destroy();
-          } catch (err) {
+          } catch {
             strapi?.log?.error('[Data transfer] Failed to close socket on error');
           }
         };
@@ -183,6 +193,10 @@ export const handlerControllerFactory =
 
           set response(response) {
             state.response = response;
+          },
+
+          get diagnostics() {
+            return diagnostics;
           },
 
           addUUID(uuid) {
@@ -232,7 +246,7 @@ export const handlerControllerFactory =
                 details = e.details;
               }
 
-              const payload = JSON.stringify({
+              const envelope: Record<string, unknown> = {
                 uuid,
                 data: data ?? null,
                 error: e
@@ -242,7 +256,9 @@ export const handlerControllerFactory =
                       details,
                     }
                   : null,
-              });
+              };
+
+              const payload = stringifyTransferWebSocketPayload(envelope);
 
               this.send(payload, (error) => (error ? reject(error) : resolve()));
             });
@@ -251,12 +267,11 @@ export const handlerControllerFactory =
           send(message, cb) {
             ws.send(message, cb);
           },
-
           confirm(message) {
             return new Promise((resolve, reject) => {
               const uuid = randomUUID();
 
-              const payload = JSON.stringify({ uuid, data: message });
+              const payload = stringifyTransferWebSocketPayload({ uuid, data: message });
 
               this.send(payload, (error) => {
                 if (error) {
@@ -321,6 +336,8 @@ export const handlerControllerFactory =
           onMessage() {},
           onError() {},
           onClose() {},
+          onInfo() {},
+          onWarning() {},
         };
 
         const handler: Handler = Object.assign(Object.create(prototype), implementation(prototype));
@@ -335,6 +352,8 @@ export const handlerControllerFactory =
             cannotRespondHandler(err);
           } finally {
             resetTimeouts();
+            strapi.db.lifecycles.enable();
+            strapi.log.info('[Data transfer] Restoring lifecycle hooks');
           }
         });
         ws.on('error', async (...args) => {
@@ -354,6 +373,16 @@ export const handlerControllerFactory =
             strapi?.log?.error(err);
             cannotRespondHandler(err);
           }
+        });
+
+        diagnostics.onDiagnostic((diagnostic) => {
+          const uuid = randomUUID();
+          const payload = JSON.stringify({
+            diagnostic,
+            uuid,
+          });
+
+          handler.send(payload);
         });
       };
 

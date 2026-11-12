@@ -1,28 +1,27 @@
 import { join } from 'path';
-import { NodePlopAPI, ActionType } from 'plop';
+import type { NodePlopAPI, ActionType } from 'plop';
 import slugify from '@sindresorhus/slugify';
+import handlebars from 'handlebars';
 import fs from 'fs-extra';
-import * as utils from '@strapi/utils';
-import tsUtils from '@strapi/typescript-utils';
+import { strings } from '@strapi/utils';
 
 import getDestinationPrompts from './prompts/get-destination-prompts';
 import getFilePath from './utils/get-file-path';
+import getGeneratorLanguage from './utils/get-generator-language';
 import ctNamesPrompts from './prompts/ct-names-prompts';
 import kindPrompts from './prompts/kind-prompts';
-import draftAndPublishPrompts from './prompts/draft-and-publish-prompts';
 import getAttributesPrompts from './prompts/get-attributes-prompts';
 import bootstrapApiPrompts from './prompts/bootstrap-api-prompts';
+import getFolderPrompts from './prompts/get-folder-prompts';
+import { appendToFile } from './utils/extend-plugin-index-files';
+import { planContentTypeToFolder } from './utils/content-structure';
 
 export default (plop: NodePlopAPI) => {
   // Model generator
   plop.setGenerator('content-type', {
     description: 'Generate a content type for an API',
     async prompts(inquirer) {
-      const config = await inquirer.prompt([
-        ...ctNamesPrompts,
-        ...kindPrompts,
-        ...draftAndPublishPrompts,
-      ]);
+      const config = await inquirer.prompt([...ctNamesPrompts, ...kindPrompts]);
       const attributes = await getAttributesPrompts(inquirer);
 
       const api = await inquirer.prompt([
@@ -34,7 +33,7 @@ export default (plop: NodePlopAPI) => {
           default: config.singularName,
           message: 'Name of the new API?',
           async validate(input) {
-            if (!utils.isKebabCase(input)) {
+            if (!strings.isKebabCase(input)) {
               return 'Value must be in kebab-case';
             }
 
@@ -58,9 +57,15 @@ export default (plop: NodePlopAPI) => {
         ...bootstrapApiPrompts,
       ]);
 
+      const folder = await getFolderPrompts(inquirer, plop, {
+        destination: api.destination,
+        kind: config.kind,
+      });
+
       return {
         ...config,
         ...api,
+        ...folder,
         attributes,
       };
     },
@@ -85,14 +90,25 @@ export default (plop: NodePlopAPI) => {
       }, {});
 
       const filePath = getFilePath(answers.destination);
-      // TODO: use basePath instead
-      const currentDir = process.cwd();
-      const language = tsUtils.isUsingTypeScriptSync(currentDir) ? 'ts' : 'js';
+      const language = getGeneratorLanguage({ plugin: answers.plugin, filePath }, plop);
+
+      const { singularName } = answers;
+
+      const schemaActionPath = `${filePath}/content-types/{{ singularName }}/schema.json`;
+
+      let uid;
+      if (answers.destination === 'new') {
+        uid = `api::${answers.id}.${singularName}`;
+      } else if (answers.api) {
+        uid = `api::${answers.api}.${singularName}`;
+      } else if (answers.plugin) {
+        uid = `plugin::${answers.plugin}.${singularName}`;
+      }
 
       const baseActions: Array<ActionType> = [
         {
           type: 'add',
-          path: `${filePath}/content-types/{{ singularName }}/schema.json`,
+          path: schemaActionPath,
           templateFile: `templates/${language}/content-type.schema.json.hbs`,
           data: {
             collectionName: slugify(answers.pluralName, { separator: '_' }),
@@ -103,7 +119,7 @@ export default (plop: NodePlopAPI) => {
       if (Object.entries(attributes).length > 0) {
         baseActions.push({
           type: 'modify',
-          path: `${filePath}/content-types/{{ singularName }}/schema.json`,
+          path: schemaActionPath,
           transform(template: string) {
             const parsedTemplate = JSON.parse(template);
             parsedTemplate.attributes = attributes;
@@ -112,18 +128,37 @@ export default (plop: NodePlopAPI) => {
         });
       }
 
-      if (answers.bootstrapApi) {
-        const { singularName } = answers;
+      if (answers.plugin) {
+        const indexPath = join(
+          plop.getDestBasePath(),
+          `${filePath}/content-types/index.${language}`
+        );
+        const exists = fs.existsSync(indexPath);
 
-        let uid;
-        if (answers.destination === 'new') {
-          uid = `api::${answers.id}.${singularName}`;
-        } else if (answers.api) {
-          uid = `api::${answers.api}.${singularName}`;
-        } else if (answers.plugin) {
-          uid = `plugin::${answers.plugin}.${singularName}`;
+        if (!exists) {
+          // Create index file if it doesn't exist
+          baseActions.push({
+            type: 'add',
+            path: `${filePath}/content-types/index.${language}`,
+            templateFile: `templates/${language}/plugin/plugin.index.${language}.hbs`,
+            skipIfExists: true,
+          });
         }
 
+        // Append the new content type to the index.ts file
+        baseActions.push({
+          type: 'modify',
+          path: `${filePath}/content-types/index.${language}`,
+          transform(template: string) {
+            return appendToFile(template, {
+              type: 'content-type',
+              singularName: answers.singularName,
+            });
+          },
+        });
+      }
+
+      if (answers.bootstrapApi) {
         baseActions.push(
           {
             type: 'add',
@@ -139,11 +174,117 @@ export default (plop: NodePlopAPI) => {
           },
           {
             type: 'add',
-            path: `${filePath}/routes/{{ singularName }}.${language}`,
+            path: `${filePath}/routes/${answers.plugin ? 'content-api/' : ''}{{ singularName }}.${language}`,
             templateFile: `templates/${language}/core-router.${language}.hbs`,
             data: { uid },
           }
         );
+
+        if (answers.plugin) {
+          const indexFiles = ['controllers', 'services', 'routes'];
+
+          indexFiles.forEach((type) => {
+            const indexPath = join(plop.getDestBasePath(), `${filePath}/${type}/index.${language}`);
+            const exists = fs.existsSync(indexPath);
+
+            if (!exists && type !== 'routes') {
+              baseActions.push({
+                type: 'add',
+                path: `${filePath}/${type}/index.${language}`,
+                templateFile: `templates/${language}/plugin/plugin.index.${language}.hbs`,
+                skipIfExists: true,
+              });
+            }
+
+            if (type === 'routes') {
+              const indexPath = join(
+                plop.getDestBasePath(),
+                `${filePath}/${type}/index.${language}`
+              );
+              const exists = fs.existsSync(indexPath);
+
+              if (!exists) {
+                baseActions.push({
+                  type: 'add',
+                  path: `${filePath}/${type}/index.${language}`,
+                  templateFile: `templates/${language}/plugin/plugin.routes.index.${language}.hbs`,
+                  skipIfExists: true,
+                });
+              }
+
+              const routeIndexFiles = ['content-api', 'admin'];
+
+              routeIndexFiles.forEach((routeType) => {
+                const routeTypeIndexPath = join(
+                  plop.getDestBasePath(),
+                  `${filePath}/${type}/${routeType}/index.${language}`
+                );
+                const routeTypeExists = fs.existsSync(routeTypeIndexPath);
+
+                if (!routeTypeExists) {
+                  baseActions.push({
+                    type: 'add',
+                    path: `${filePath}/${type}/${routeType}/index.${language}`,
+                    templateFile: `templates/${language}/plugin/plugin.routes.type.index.${language}.hbs`,
+                    data: { type: routeType },
+                    skipIfExists: true,
+                  });
+                }
+              });
+            }
+
+            baseActions.push({
+              type: 'modify',
+              path: `${filePath}/${type}/${type === 'routes' ? 'content-api/' : ''}index.${language}`,
+              transform(template: string) {
+                if (type === 'routes') {
+                  return appendToFile(template, {
+                    type: 'routes',
+                    singularName: answers.singularName,
+                  });
+                }
+
+                return appendToFile(template, {
+                  type: 'index',
+                  singularName: answers.singularName,
+                });
+              },
+            });
+          });
+        }
+      }
+
+      if (answers.folder) {
+        if (!uid) {
+          throw new Error(
+            'Cannot assign a folder: could not determine the content type uid from the given destination.'
+          );
+        }
+
+        const contentTypeAlreadyExists = fs.existsSync(
+          join(plop.getDestBasePath(), handlebars.compile(schemaActionPath)(answers))
+        );
+
+        if (contentTypeAlreadyExists) {
+          throw new Error(
+            `Content type "${uid}" already exists — refusing to reassign its folder from the generator.`
+          );
+        }
+
+        const assignedUid = uid;
+
+        const commitFolderAssignment = planContentTypeToFolder({
+          destBasePath: plop.getDestBasePath(),
+          folder: answers.folder,
+          kind: answers.kind,
+          uid: assignedUid,
+        });
+
+        baseActions.push(() => {
+          commitFolderAssignment();
+
+          return `assigned "${assignedUid}" to folder`;
+        });
       }
 
       return baseActions;

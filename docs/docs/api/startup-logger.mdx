@@ -1,9 +1,9 @@
 ---
 title: Startup Logger
+description: 'Logger that displays startup information and statistics about the Strapi instance.'
 slug: /api/StartupLogger
 tags:
-  - module
-  - private
+  - internal
 
 toc_min_heading_level: 2
 toc_max_heading_level: 3
@@ -68,6 +68,18 @@ Will display the correct start-up message according to the specified boolean.
 
 :::note
 
-Can be disabled by setting `STRAPI_HIDE_STARTUP_MESSAGE` to `true`.
+Can be disabled by setting the server config value:
+
+```javascript
+// in config/server.js
+{
+  logger: {
+    startup: {
+      enabled: false;
+    }
+  },
+  // ...the rest of your server config
+}
+```
 
 :::

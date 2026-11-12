@@ -19,7 +19,10 @@ export interface LifecycleProvider {
   subscribe(subscriber: Subscriber): () => void;
   clear(): void;
   run(action: Action, uid: string, properties: Properties, states?: States): Promise<States>;
+  hasSubscribers(action: Action, uid: string): boolean;
   createEvent(action: Action, uid: string, properties: Properties, state: State): Event;
+  disable(): void;
+  enable(): void;
 }
 
 export const createLifecyclesProvider = (db: Database): LifecycleProvider => {
@@ -27,6 +30,8 @@ export const createLifecyclesProvider = (db: Database): LifecycleProvider => {
     subscriberUtils.timestampsLifecyclesSubscriber,
     subscriberUtils.modelsLifecyclesSubscriber,
   ];
+
+  let isLifecycleHooksDisabled = false;
 
   return {
     subscribe(subscriber) {
@@ -37,11 +42,55 @@ export const createLifecyclesProvider = (db: Database): LifecycleProvider => {
 
       subscribers.push(subscriber);
 
-      return () => subscribers.splice(subscribers.indexOf(subscriber), 1);
+      return () => {
+        const index = subscribers.indexOf(subscriber);
+
+        if (index >= 0) {
+          subscribers.splice(index, 1);
+        }
+      };
     },
 
     clear() {
       subscribers = [];
+    },
+
+    disable() {
+      isLifecycleHooksDisabled = true;
+    },
+
+    enable() {
+      isLifecycleHooksDisabled = false;
+    },
+
+    /**
+     * Whether running `action` on `uid` would reach anyone: a lifecycle declared on the model, a
+     * subscriber registered for that model or for every model, or a subscriber function. The
+     * provider's own timestamps subscriber does not count: it only stamps the data of a write that
+     * is about to happen and observes nothing.
+     */
+    hasSubscribers(action, uid) {
+      if (isLifecycleHooksDisabled) {
+        return false;
+      }
+
+      return subscribers.some((subscriber) => {
+        if (subscriber === subscriberUtils.timestampsLifecyclesSubscriber) {
+          return false;
+        }
+
+        if (subscriber === subscriberUtils.modelsLifecyclesSubscriber) {
+          const model = db.metadata.get(uid);
+
+          return Boolean(model.lifecycles && action in model.lifecycles);
+        }
+
+        if (typeof subscriber === 'function') {
+          return true;
+        }
+
+        return action in subscriber && (!subscriber.models || subscriber.models.includes(uid));
+      });
     },
 
     createEvent(action, uid, properties, state): Event {
@@ -62,6 +111,7 @@ export const createLifecyclesProvider = (db: Database): LifecycleProvider => {
      * @param {Map<any, any>} states
      */
     async run(action, uid, properties, states = new Map()) {
+      if (isLifecycleHooksDisabled) return states;
       for (let i = 0; i < subscribers.length; i += 1) {
         const subscriber = subscribers[i];
         if (typeof subscriber === 'function') {

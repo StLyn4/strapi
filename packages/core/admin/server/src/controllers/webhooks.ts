@@ -1,8 +1,12 @@
+import isLocalhostIp from 'is-localhost-ip';
 import type { Context } from 'koa';
-
 import _ from 'lodash';
-import { yup, validateYupSchema } from '@strapi/utils';
-import { Webhook } from '@strapi/types';
+
+import { yup, validateYupSchema, emitAudit, errors } from '@strapi/utils';
+
+import type { Modules } from '@strapi/types';
+
+import { AUDITED_EVENTS, getWebhookChanges, toAuditedWebhook } from '../audit-logs/webhooks';
 
 import {
   CreateWebhook,
@@ -20,7 +24,27 @@ const urlRegex =
 const webhookValidator = yup
   .object({
     name: yup.string().required(),
-    url: yup.string().matches(urlRegex, 'url must be a valid URL').required(),
+    url: yup
+      .string()
+      .matches(urlRegex, 'url must be a valid URL')
+      .required()
+      .test(
+        'is-public-url',
+        "Url is not supported because it isn't reachable over the public internet",
+        async (url) => {
+          if (process.env.NODE_ENV !== 'production') {
+            return true;
+          }
+
+          try {
+            const parsedUrl = new URL(url!);
+            const isLocalUrl = await isLocalhostIp(parsedUrl.hostname);
+            return !isLocalUrl;
+          } catch {
+            return false;
+          }
+        }
+      ),
     headers: yup.lazy((data) => {
       if (typeof data !== 'object') {
         return yup.object().required();
@@ -36,6 +60,13 @@ const webhookValidator = yup
         .required();
     }),
     events: yup.array().of(yup.string()).required(),
+    contentTypeEvents: yup.lazy((data) =>
+      yup.object(
+        _.isPlainObject(data)
+          ? _.mapValues(data, () => yup.array().of(yup.string().required()).required())
+          : {}
+      )
+    ),
   })
   .noUnknown();
 
@@ -43,15 +74,34 @@ const updateWebhookValidator = webhookValidator.shape({
   isEnabled: yup.boolean(),
 });
 
+type ContentTypeEvents = Modules.WebhookStore.Webhook['contentTypeEvents'];
+
+/**
+ * Content types already saved on the webhook are not checked, so that a webhook can still be
+ * updated after one of its content types has been deleted.
+ */
+const validateContentTypes = (
+  contentTypeEvents: ContentTypeEvents = {},
+  savedContentTypeEvents: ContentTypeEvents = {}
+) => {
+  Object.keys(contentTypeEvents).forEach((uid) => {
+    if (Object.hasOwn(strapi.contentTypes, uid) || Object.hasOwn(savedContentTypeEvents, uid)) {
+      return;
+    }
+
+    throw new errors.ValidationError(`Content type ${uid} does not exist`);
+  });
+};
+
 export default {
   async listWebhooks(ctx: Context) {
-    const webhooks = await strapi.webhookStore.findWebhooks();
+    const webhooks = await strapi.get('webhookStore').findWebhooks();
     ctx.send({ data: webhooks } satisfies GetWebhooks.Response);
   },
 
   async getWebhook(ctx: Context) {
     const { id } = ctx.params;
-    const webhook = await strapi.webhookStore.findWebhook(id);
+    const webhook = await strapi.get('webhookStore').findWebhook(id);
 
     if (!webhook) {
       return ctx.notFound('webhook.notFound');
@@ -64,10 +114,13 @@ export default {
     const { body } = ctx.request as CreateWebhook.Request;
 
     await validateYupSchema(webhookValidator)(body);
+    validateContentTypes(body.contentTypeEvents);
 
-    const webhook = await strapi.webhookStore.createWebhook(body);
+    const webhook = await strapi.get('webhookStore').createWebhook(body);
 
-    strapi.webhookRunner.add(webhook);
+    strapi.get('webhookRunner').add(webhook);
+
+    await emitAudit({ strapi }, AUDITED_EVENTS.WEBHOOK_CREATE, toAuditedWebhook(webhook));
 
     ctx.created({ data: webhook } satisfies CreateWebhook.Response);
   },
@@ -78,13 +131,15 @@ export default {
 
     await validateYupSchema(updateWebhookValidator)(body);
 
-    const webhook = await strapi.webhookStore.findWebhook(id);
+    const webhook = await strapi.get('webhookStore').findWebhook(id);
 
     if (!webhook) {
       return ctx.notFound('webhook.notFound');
     }
 
-    const updatedWebhook = await strapi.webhookStore.updateWebhook(id, {
+    validateContentTypes(body.contentTypeEvents, webhook.contentTypeEvents);
+
+    const updatedWebhook = await strapi.get('webhookStore').updateWebhook(id, {
       ...webhook,
       ...body,
     });
@@ -93,22 +148,37 @@ export default {
       return ctx.notFound('webhook.notFound');
     }
 
-    strapi.webhookRunner.update(updatedWebhook);
+    strapi.get('webhookRunner').update(updatedWebhook);
+
+    const changes = getWebhookChanges(webhook, updatedWebhook);
+
+    if (!_.isEmpty(changes)) {
+      await emitAudit({ strapi }, AUDITED_EVENTS.WEBHOOK_UPDATE, {
+        webhookId: updatedWebhook.id,
+        name: updatedWebhook.name,
+        changes,
+      });
+    }
 
     ctx.send({ data: updatedWebhook } satisfies UpdateWebhook.Response);
   },
 
   async deleteWebhook(ctx: Context) {
     const { id } = ctx.params;
-    const webhook = await strapi.webhookStore.findWebhook(id);
+    const webhook = await strapi.get('webhookStore').findWebhook(id);
 
     if (!webhook) {
       return ctx.notFound('webhook.notFound');
     }
 
-    await strapi.webhookStore.deleteWebhook(id);
+    await strapi.get('webhookStore').deleteWebhook(id);
 
-    strapi.webhookRunner.remove(webhook);
+    strapi.get('webhookRunner').remove(webhook);
+
+    await emitAudit({ strapi }, AUDITED_EVENTS.WEBHOOK_DELETE, {
+      webhookId: webhook.id,
+      name: webhook.name,
+    });
 
     ctx.body = { data: webhook } satisfies DeleteWebhook.Response;
   },
@@ -121,11 +191,16 @@ export default {
     }
 
     for (const id of ids) {
-      const webhook = await strapi.webhookStore.findWebhook(id);
+      const webhook = await strapi.get('webhookStore').findWebhook(id);
 
       if (webhook) {
-        await strapi.webhookStore.deleteWebhook(id);
-        strapi.webhookRunner.remove(webhook);
+        await strapi.get('webhookStore').deleteWebhook(id);
+        strapi.get('webhookRunner').remove(webhook);
+
+        await emitAudit({ strapi }, AUDITED_EVENTS.WEBHOOK_DELETE, {
+          webhookId: webhook.id,
+          name: webhook.name,
+        });
       }
     }
 
@@ -135,9 +210,11 @@ export default {
   async triggerWebhook(ctx: Context) {
     const { id } = ctx.params;
 
-    const webhook = await strapi.webhookStore.findWebhook(id);
+    const webhook = await strapi.get('webhookStore').findWebhook(id);
 
-    const response = await strapi.webhookRunner.run(webhook as Webhook, 'trigger-test', {});
+    const response = await strapi
+      .get('webhookRunner')
+      .run(webhook as Modules.WebhookStore.Webhook, 'trigger-test', {});
 
     ctx.body = { data: response } satisfies TriggerWebhook.Response;
   },

@@ -1,20 +1,20 @@
 import * as utils from '@strapi/utils';
-import { pick } from 'lodash/fp';
-import type { Common } from '@strapi/types';
+import { pick } from 'lodash';
+import type { Core } from '@strapi/types';
 import { getService } from '../utils';
 import { validateCreateLocaleInput, validateUpdateLocaleInput } from '../validation/locales';
 import { formatLocale } from '../domain/locale';
 
-const { setCreatorFields, sanitize } = utils;
+const { setCreatorFields } = utils;
 const { ApplicationError } = utils.errors;
 
 const sanitizeLocale = (locale: any) => {
   const model = strapi.getModel('plugin::i18n.locale');
 
-  return sanitize.contentAPI.output(locale, model);
+  return strapi.contentAPI.sanitize.output(locale, model);
 };
 
-const controller: Common.Controller = {
+const controller: Core.Controller = {
   async listLocales(ctx) {
     const localesService = getService('locales');
 
@@ -26,7 +26,7 @@ const controller: Common.Controller = {
 
   async createLocale(ctx) {
     const { user } = ctx.state;
-    const { body } = ctx.request;
+    const body = ctx.request.body as any;
     const { isDefault, ...localeToCreate } = body;
 
     await validateCreateLocaleInput(body);
@@ -40,7 +40,7 @@ const controller: Common.Controller = {
 
     const localeToPersist = setCreatorFields({ user })(formatLocale(localeToCreate));
 
-    const locale = await localesService.create(localeToPersist);
+    const locale = await localesService.create(localeToPersist, { isDefault: Boolean(isDefault) });
 
     if (isDefault) {
       await localesService.setDefaultLocale(locale);
@@ -54,7 +54,7 @@ const controller: Common.Controller = {
   async updateLocale(ctx) {
     const { user } = ctx.state;
     const { id } = ctx.params;
-    const { body } = ctx.request;
+    const body = ctx.request.body as any;
     const { isDefault, ...updates } = body;
 
     await validateUpdateLocaleInput(body);
@@ -67,9 +67,13 @@ const controller: Common.Controller = {
     }
 
     const allowedParams = ['name'];
-    const cleanUpdates = setCreatorFields({ user, isEdition: true })(pick(allowedParams, updates));
+    const cleanUpdates = setCreatorFields({ user, isEdition: true })(pick(updates, allowedParams));
 
     const updatedLocale = await localesService.update({ id }, cleanUpdates);
+
+    if (updatedLocale === null) {
+      return ctx.notFound('locale.notFound');
+    }
 
     if (isDefault) {
       await localesService.setDefaultLocale(updatedLocale);

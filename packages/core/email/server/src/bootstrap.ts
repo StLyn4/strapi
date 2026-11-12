@@ -1,8 +1,13 @@
-import type { Strapi } from '@strapi/types';
+import type { Core } from '@strapi/types';
+import type { ProviderCapabilities } from '../../shared/types';
 import type { EmailConfig, SendOptions } from './types';
 
 interface EmailProvider {
   send: (options: SendOptions) => Promise<any>;
+  verify?: () => Promise<boolean>;
+  isIdle?: () => boolean;
+  close?: () => void;
+  getCapabilities?: () => ProviderCapabilities;
 }
 
 interface EmailProviderModule {
@@ -22,7 +27,12 @@ const createProvider = (emailConfig: EmailConfig) => {
   try {
     modulePath = require.resolve(`@strapi/provider-email-${providerName}`);
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'MODULE_NOT_FOUND') {
+    if (
+      error !== null &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'MODULE_NOT_FOUND'
+    ) {
       modulePath = providerName;
     } else {
       throw error;
@@ -32,14 +42,27 @@ const createProvider = (emailConfig: EmailConfig) => {
   try {
     provider = require(modulePath);
   } catch (err) {
-    throw new Error(`Could not load email provider "${providerName}".`);
+    const newError = new Error(`Could not load email provider "${providerName}".`);
+    if (err instanceof Error) {
+      newError.stack = err.stack;
+    }
+    throw newError;
   }
 
   return provider.init(emailConfig.providerOptions, emailConfig.settings);
 };
 
-export const bootstrap = async ({ strapi }: { strapi: Strapi }) => {
-  const emailConfig: EmailConfig = strapi.config.get('plugin.email');
+export const bootstrap = async ({ strapi }: { strapi: Core.Strapi }) => {
+  const emailConfig: EmailConfig = strapi.config.get('plugin::email');
+
+  const providerName = emailConfig.provider.toLowerCase();
+  const isDevelopment = process.env.NODE_ENV === 'development';
+  if (providerName === 'sendmail' && isDevelopment) {
+    strapi.log.warn(
+      '[email]: The "sendmail" email provider is still supported, but for most production setups that use a dedicated SMTP relay, consider switching to @strapi/provider-email-nodemailer (set `provider` to `"nodemailer"` in your email plugin config). This message is only shown in development.'
+    );
+  }
+
   strapi.plugin('email').provider = createProvider(emailConfig);
 
   // Add permissions
@@ -53,5 +76,5 @@ export const bootstrap = async ({ strapi }: { strapi: Strapi }) => {
     },
   ];
 
-  await strapi.admin!.services.permission.actionProvider.registerMany(actions);
+  await strapi.service('admin::permission').actionProvider.registerMany(actions);
 };

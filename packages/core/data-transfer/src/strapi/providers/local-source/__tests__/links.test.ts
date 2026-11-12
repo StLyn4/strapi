@@ -1,329 +1,128 @@
-import { Readable } from 'stream';
+import { collect } from '../../../../__tests__/test-utils';
+import { DEFAULT_DETAILED_WARNING_LIMIT } from '../../../../utils/capped-warnings';
+import { createLinksStream, formatOrphanedLinksExportSummary } from '../links';
 
-import { createLinksStream } from '../links';
-import { collect, getStrapiFactory } from '../../../../__tests__/test-utils';
+describe('createLinksStream', () => {
+  const buildStrapiWithOrphans = (orphanCount: number) => {
+    const joinTableRows = Array.from({ length: orphanCount }, (_, index) => ({
+      chapter_id: 1,
+      node_id: 100 + index,
+      chapter_ord: index + 1,
+    }));
 
-// TODO: entityService needs to be replaced with a mocked wrapper of db.connection and provide real metadata
-describe.skip('Local Strapi Source Provider - Entities Streaming', () => {
-  describe('Create Links Stream', () => {
-    test('should return an empty stream if no content types ', async () => {
-      const strapi = getStrapiFactory({
-        contentTypes: {},
-        components: {},
-        entityService: { findMany: jest.fn(() => []) },
-      })();
+    const connection = {
+      client: { connectionSettings: {} },
+      queryBuilder() {
+        let joinMode: 'inner' | 'left' | null = null;
 
-      const stream = createLinksStream(strapi);
+        const qb: Record<string, unknown> = {
+          from: jest.fn().mockReturnThis(),
+          select: jest.fn().mockReturnThis(),
+          innerJoin: jest.fn(function innerJoin() {
+            joinMode = 'inner';
+            return this;
+          }),
+          leftJoin: jest.fn(function leftJoin() {
+            joinMode = 'left';
+            return this;
+          }),
+          whereNotNull: jest.fn().mockReturnThis(),
+          whereNull: jest.fn().mockReturnThis(),
+          where: jest.fn().mockReturnThis(),
+          transacting: jest.fn().mockReturnThis(),
+          then(resolve: (value: unknown) => void) {
+            if (joinMode === 'inner') {
+              resolve([]);
+              return;
+            }
 
-      expect(stream).toBeInstanceOf(Readable);
+            if (joinMode === 'left') {
+              resolve(
+                joinTableRows.map((row) => ({
+                  ...row,
+                  __left_exists: row.chapter_id,
+                  __right_exists: null,
+                }))
+              );
+              return;
+            }
 
-      const links = await collect(stream);
-
-      expect(strapi.entityService.findMany).not.toHaveBeenCalled();
-      expect(links).toHaveLength(0);
-    });
-
-    test('should return an empty stream if content types but without links (but has components, dynamic zones) ', async () => {
-      const strapi = getStrapiFactory({
-        contentTypes: {
-          blog: {
-            uid: 'blog',
-            attributes: {
-              title: {
-                type: 'string',
-              },
-              compo: {
-                type: 'component',
-                component: 'somecomponent',
-              },
-              dz: {
-                type: 'dynamiczone',
-                components: ['somecomponent'],
-              },
-            },
+            resolve(joinTableRows);
           },
+        };
+
+        return qb;
+      },
+    };
+
+    return {
+      contentTypes: {
+        'api::chapter.chapter': {},
+      },
+      components: {},
+      db: {
+        connection,
+        metadata: {
+          get: jest.fn((uid: string) => {
+            if (uid === 'api::node.node') {
+              return { tableName: 'nodes', attributes: {} };
+            }
+
+            return {
+              tableName: 'chapters',
+              attributes: {
+                nodes: {
+                  type: 'relation',
+                  relation: 'oneToMany',
+                  target: 'api::node.node',
+                  owner: true,
+                  joinTable: {
+                    name: 'chapters_node_lnk',
+                    joinColumn: { name: 'chapter_id' },
+                    inverseJoinColumn: { name: 'node_id' },
+                    orderColumnName: 'chapter_ord',
+                  },
+                },
+              },
+            };
+          }),
         },
-        components: {
-          somecomponent: {
-            uid: 'somecomponent',
-            attributes: {
-              title: {
-                type: 'string',
-              },
-            },
-          },
-        },
-        entityService: {
-          findMany: jest.fn(() => [{ id: 1 }, { id: 2 }]),
-        },
-      })();
+        query: jest.fn(),
+      },
+    } as unknown as import('@strapi/types').Core.Strapi;
+  };
 
-      const stream = createLinksStream(strapi);
+  test('warns for each omitted orphan link and emits a summary when the stream completes', async () => {
+    const onWarning = jest.fn();
+    const strapi = buildStrapiWithOrphans(1);
 
-      expect(stream).toBeInstanceOf(Readable);
+    const links = await collect(createLinksStream(strapi, { onWarning }));
 
-      const links = await collect(stream);
+    expect(links).toEqual([]);
+    expect(onWarning).toHaveBeenCalledTimes(2);
+    expect(onWarning).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('Omitting link api::chapter.chapter:1 -> api::node.node:100')
+    );
+    expect(onWarning).toHaveBeenNthCalledWith(2, formatOrphanedLinksExportSummary(1));
+  });
 
-      expect(strapi.entityService.findMany).toHaveBeenCalledTimes(1);
-      expect(strapi.entityService.findMany).toHaveBeenCalledWith('blog', {
-        fields: ['id'],
-        // We should not populate the component & dynamic zone
-        // attributes since they do not contains any relations
-        populate: {},
-      });
-      expect(links).toHaveLength(0);
-    });
+  test('caps detailed orphan warnings and still emits the full summary count', async () => {
+    const onWarning = jest.fn();
+    const orphanCount = DEFAULT_DETAILED_WARNING_LIMIT + 5;
+    const strapi = buildStrapiWithOrphans(orphanCount);
 
-    test('Should return an empty stream if no links have been created for the relations', async () => {
-      const strapi = getStrapiFactory({
-        contentTypes: {
-          blog: {
-            uid: 'blog',
-            attributes: {
-              title: {
-                type: 'string',
-              },
-              compo: {
-                type: 'component',
-                component: 'somecomponent',
-              },
-              dz: {
-                type: 'dynamiczone',
-                components: ['somecomponent'],
-              },
-              blog: {
-                type: 'relation',
-                relation: 'oneToOne',
-                target: 'blog',
-              },
-            },
-          },
-        },
-        components: {
-          somecomponent: {
-            uid: 'somecomponent',
-            attributes: {
-              title: {
-                type: 'string',
-              },
-              blog: {
-                type: 'relation',
-                target: 'blog',
-                relation: 'oneToOne',
-              },
-            },
-          },
-        },
-        entityService: {
-          findMany: jest.fn(() => [
-            {
-              id: 1,
-              compo: { id: 1, blog: null },
-              dz: [
-                { __component: 'somecomponent', id: 1, blog: null },
-                { __component: 'somecomponent', id: 2, blog: null },
-              ],
-              blog: null,
-            },
-            {
-              id: 2,
-              compo: { id: 3, blog: null },
-              dz: [
-                { __component: 'somecomponent', id: 2, blog: null },
-                { __component: 'somecomponent', id: 3, blog: null },
-              ],
-              blog: null,
-            },
-          ]),
-        },
-      })();
+    await collect(createLinksStream(strapi, { onWarning }));
 
-      const stream = createLinksStream(strapi);
+    const detailedWarnings = onWarning.mock.calls.filter(([message]) =>
+      String(message).startsWith('Omitting link ')
+    );
+    const suppressionWarnings = onWarning.mock.calls.filter(([message]) =>
+      String(message).includes('Further detailed warnings suppressed')
+    );
 
-      expect(stream).toBeInstanceOf(Readable);
-
-      const links = await collect(stream);
-
-      expect(strapi.entityService.findMany).toHaveBeenCalledTimes(1);
-      expect(strapi.entityService.findMany).toHaveBeenCalledWith('blog', {
-        fields: ['id'],
-        populate: {
-          blog: {
-            fields: ['id'],
-          },
-          compo: {
-            fields: ['id'],
-            populate: {
-              blog: {
-                fields: ['id'],
-              },
-            },
-          },
-          dz: {
-            fields: ['id'],
-            populate: {
-              blog: {
-                fields: ['id'],
-              },
-            },
-          },
-        },
-      });
-      expect(links).toHaveLength(0);
-    });
-
-    test('Should return a populated stream if there are content types with actual relation items', async () => {
-      const strapi = getStrapiFactory({
-        contentTypes: {
-          blog: {
-            uid: 'blog',
-            attributes: {
-              title: {
-                type: 'string',
-              },
-              compo: {
-                type: 'component',
-                component: 'somecomponent',
-              },
-              dz: {
-                type: 'dynamiczone',
-                components: ['somecomponent'],
-              },
-              blog: {
-                type: 'relation',
-                relation: 'oneToOne',
-                target: 'blog',
-              },
-            },
-          },
-        },
-        components: {
-          somecomponent: {
-            uid: 'somecomponent',
-            attributes: {
-              title: {
-                type: 'string',
-              },
-              blog: {
-                type: 'relation',
-                target: 'blog',
-                relation: 'oneToOne',
-              },
-            },
-          },
-        },
-        entityService: {
-          findMany: jest.fn(() => [
-            {
-              id: 1,
-              compo: { id: 1, blog: { id: 2 } },
-              dz: [
-                { __component: 'somecomponent', id: 2, blog: { id: 2 } },
-                { __component: 'somecomponent', id: 3, blog: null },
-              ],
-              blog: { id: 2 },
-            },
-            {
-              id: 2,
-              compo: { id: 4, blog: null },
-              dz: [
-                { __component: 'somecomponent', id: 5, blog: null },
-                { __component: 'somecomponent', id: 6, blog: { id: 1 } },
-              ],
-              blog: null,
-            },
-          ]),
-        },
-      })();
-
-      const stream = createLinksStream(strapi);
-
-      expect(stream).toBeInstanceOf(Readable);
-
-      const links = await collect(stream);
-
-      expect(strapi.entityService.findMany).toHaveBeenCalledTimes(1);
-      expect(strapi.entityService.findMany).toHaveBeenCalledWith('blog', {
-        fields: ['id'],
-        populate: {
-          blog: {
-            fields: ['id'],
-          },
-          compo: {
-            fields: ['id'],
-            populate: {
-              blog: {
-                fields: ['id'],
-              },
-            },
-          },
-          dz: {
-            fields: ['id'],
-            populate: {
-              blog: {
-                fields: ['id'],
-              },
-            },
-          },
-        },
-      });
-      expect(links).toHaveLength(4);
-      expect(links).toMatchObject(
-        expect.objectContaining([
-          {
-            kind: 'relation.basic',
-            relation: 'oneToOne',
-            left: {
-              type: 'somecomponent',
-              ref: 1,
-              field: 'blog',
-            },
-            right: {
-              type: 'blog',
-              ref: 2,
-            },
-          },
-          {
-            kind: 'relation.basic',
-            relation: 'oneToOne',
-            left: {
-              type: 'somecomponent',
-              ref: 2,
-              field: 'blog',
-            },
-            right: {
-              type: 'blog',
-              ref: 2,
-            },
-          },
-          {
-            kind: 'relation.circular',
-            relation: 'oneToOne',
-            left: {
-              type: 'blog',
-              ref: 1,
-              field: 'blog',
-            },
-            right: {
-              type: 'blog',
-              ref: 2,
-            },
-          },
-          {
-            kind: 'relation.basic',
-            relation: 'oneToOne',
-            left: {
-              type: 'somecomponent',
-              ref: 6,
-              field: 'blog',
-            },
-            right: {
-              type: 'blog',
-              ref: 1,
-            },
-          },
-        ])
-      );
-    });
+    expect(detailedWarnings).toHaveLength(DEFAULT_DETAILED_WARNING_LIMIT);
+    expect(suppressionWarnings).toHaveLength(1);
+    expect(onWarning).toHaveBeenLastCalledWith(formatOrphanedLinksExportSummary(orphanCount));
   });
 });

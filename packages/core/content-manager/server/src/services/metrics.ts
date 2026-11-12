@@ -1,20 +1,21 @@
-import { intersection, prop } from 'lodash/fp';
+import { intersection } from 'lodash';
+
 import { relations } from '@strapi/utils';
-import { LoadedStrapi as Strapi, Schema } from '@strapi/types';
+import type { Core, Struct } from '@strapi/types';
 import type { Configuration } from '../../../shared/contracts/content-types';
 
 const { getRelationalFields } = relations;
 
-export default ({ strapi }: { strapi: Strapi }) => {
+export default ({ strapi }: { strapi: Core.Strapi }) => {
   const sendDidConfigureListView = async (
-    contentType: Schema.ContentType,
+    contentType: Struct.ContentTypeSchema,
     configuration: Configuration
   ) => {
-    const displayedFields = prop('length', configuration.layouts.list);
+    const displayedFields = configuration.layouts.list?.length;
     const relationalFields = getRelationalFields(contentType);
     const displayedRelationalFields = intersection(
-      relationalFields,
-      configuration.layouts.list
+      configuration.layouts.list,
+      relationalFields
     ).length;
 
     const data = {
@@ -28,11 +29,7 @@ export default ({ strapi }: { strapi: Strapi }) => {
       });
     }
 
-    try {
-      await strapi.telemetry.send('didConfigureListView', data);
-    } catch (e) {
-      // silence
-    }
+    strapi.telemetry.send('didConfigureListView', data).catch(() => {});
   };
 
   return {

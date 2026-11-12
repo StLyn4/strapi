@@ -1,7 +1,7 @@
 import type { Context } from 'koa';
 import { differenceInHours, parseISO } from 'date-fns';
 import { errors } from '@strapi/utils';
-import { castArray, isNil } from 'lodash/fp';
+import { castArray } from 'lodash';
 
 import { getService } from '../utils';
 
@@ -34,7 +34,6 @@ export const authenticate = async (ctx: Context) => {
     return { authenticated: false };
   }
 
-  // @ts-ignore
   const transferToken = await tokenService.getBy({ accessKey: tokenService.hash(token) });
 
   // Check if the token exists
@@ -45,7 +44,7 @@ export const authenticate = async (ctx: Context) => {
   // Check if the token has expired
   const currentDate = new Date();
 
-  if (!isNil(transferToken.expiresAt)) {
+  if (transferToken.expiresAt != null) {
     const expirationDate = new Date(transferToken.expiresAt);
 
     if (expirationDate < currentDate) {
@@ -54,10 +53,10 @@ export const authenticate = async (ctx: Context) => {
   }
 
   // Update token metadata if the token has not been used in the last hour
-  // @ts-ignore
+  // @ts-expect-error - FIXME: verify lastUsedAt is defined
   const hoursSinceLastUsed = differenceInHours(currentDate, parseISO(transferToken.lastUsedAt));
   if (hoursSinceLastUsed >= 1) {
-    await strapi.query('admin::api-token').update({
+    await strapi.db.query('admin::api-token').update({
       where: { id: transferToken.id },
       data: { lastUsedAt: currentDate },
     });
@@ -85,7 +84,7 @@ export const verify = async (auth: any, config: any = {}) => {
 
   const currentDate = new Date();
 
-  if (!isNil(transferToken.expiresAt)) {
+  if (transferToken.expiresAt != null) {
     const expirationDate = new Date(transferToken.expiresAt);
     // token has expired
     if (expirationDate < currentDate) {

@@ -1,7 +1,9 @@
-import { SingleSelectOption, SingleSelect, SingleSelectProps } from '@strapi/design-system';
+import { SingleSelectOption, SingleSelect, SingleSelectProps, Field } from '@strapi/design-system';
 import { MessageDescriptor, useIntl } from 'react-intl';
 
 import { isErrorMessageMessageDescriptor } from '../../utils/forms';
+
+const EMPTY_OPTIONS: NonNullable<TokenTypeSelectProps['options']> = [];
 
 interface TokenTypeSelectProps extends Pick<SingleSelectProps, 'onChange' | 'value'> {
   name?: string;
@@ -20,19 +22,13 @@ export const TokenTypeSelect = ({
   value,
   onChange,
   canEditInputs,
-  options = [],
+  options = EMPTY_OPTIONS,
   label,
 }: TokenTypeSelectProps) => {
   const { formatMessage } = useIntl();
 
   return (
-    <SingleSelect
-      name={name}
-      label={formatMessage({
-        id: label.id,
-        defaultMessage: label.defaultMessage,
-      })}
-      value={value}
+    <Field.Root
       error={
         error
           ? formatMessage(
@@ -40,17 +36,29 @@ export const TokenTypeSelect = ({
             )
           : undefined
       }
-      onChange={onChange}
-      placeholder="Select"
+      name={name}
       required
-      disabled={!canEditInputs}
     >
-      {options &&
-        options.map(({ value, label }) => (
-          <SingleSelectOption key={value} value={value}>
-            {formatMessage(label)}
-          </SingleSelectOption>
-        ))}
-    </SingleSelect>
+      <Field.Label>
+        {formatMessage({
+          id: label.id,
+          defaultMessage: label.defaultMessage,
+        })}
+      </Field.Label>
+      <SingleSelect
+        value={value}
+        onChange={onChange}
+        placeholder="Select"
+        disabled={!canEditInputs}
+      >
+        {options &&
+          options.map(({ value, label }) => (
+            <SingleSelectOption key={value} value={value}>
+              {formatMessage(label)}
+            </SingleSelectOption>
+          ))}
+      </SingleSelect>
+      <Field.Error />
+    </Field.Root>
   );
 };

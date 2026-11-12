@@ -1,10 +1,8 @@
-import semver from 'semver';
 import type { Knex } from 'knex';
 
 import Dialect from '../dialect';
 import MysqlSchemaInspector from './schema-inspector';
 import MysqlDatabaseInspector from './database-inspector';
-import { MYSQL } from './constants';
 import type { Database } from '../..';
 
 import type { Information } from './database-inspector';
@@ -23,8 +21,8 @@ export default class MysqlDialect extends Dialect {
     this.databaseInspector = new MysqlDatabaseInspector(db);
   }
 
-  configure() {
-    const connection = this.db.config.connection.connection as Knex.MySqlConnectionConfig;
+  configure(conn?: Knex.MySqlConnectionConfig) {
+    const connection = conn || (this.db.config.connection.connection as Knex.MySqlConnectionConfig);
 
     connection.supportBigNumbers = true;
     // Only allow bigNumberStrings option set to be true if no connection option passed
@@ -54,21 +52,31 @@ export default class MysqlDialect extends Dialect {
     };
   }
 
-  async initialize() {
+  async initialize(nativeConnection: unknown) {
     try {
-      await this.db.connection.raw(`set session sql_require_primary_key = 0;`);
-    } catch (err) {
+      await this.db.connection
+        .raw(`set session sql_require_primary_key = 0;`)
+        .connection(nativeConnection);
+    } catch {
       // Ignore error due to lack of session permissions
     }
 
-    this.info = await this.databaseInspector.getInformation();
+    // We only need to get info on the first connection in the pool
+    /**
+     * Note: There is a race condition here where if two connections are opened at the same time, both will retrieve
+     * db info, but it doesn't cause issues, it's just one wasted query one time, so we can safely leave it to avoid
+     * adding extra complexity
+     * */
+    if (!this.info) {
+      this.info = await this.databaseInspector.getInformation(nativeConnection);
+    }
   }
 
   async startSchemaUpdate() {
     try {
       await this.db.connection.raw(`set foreign_key_checks = 0;`);
       await this.db.connection.raw(`set session sql_require_primary_key = 0;`);
-    } catch (err) {
+    } catch {
       // Ignore error due to lack of session permissions
     }
   }
@@ -81,20 +89,47 @@ export default class MysqlDialect extends Dialect {
     return true;
   }
 
-  supportsWindowFunctions() {
-    const isMysqlDB = !this.info?.database || this.info.database === MYSQL;
-    const isBeforeV8 =
-      !semver.valid(this.info?.version) || semver.lt(this.info?.version ?? '', '8.0.0');
-
-    if (isMysqlDB && isBeforeV8) {
-      return false;
-    }
-
+  usesForeignKeys() {
     return true;
   }
 
-  usesForeignKeys() {
-    return true;
+  /**
+   * Drops the foreign-key constraint named `name` on `table` (MySQL FK names
+   * are unique per database, so a stale one blocks re-creating it on any
+   * table), then the index of the same name. Runs on `trx`.
+   */
+  async dropSchemaObject(
+    trx: Knex,
+    { table, name }: { table: string; name: string }
+  ): Promise<boolean> {
+    let dropped = false;
+
+    const [foreignKeys] = await trx.raw(
+      `SELECT 1
+       FROM information_schema.table_constraints
+       WHERE table_schema = database() AND table_name = ? AND constraint_name = ?
+       AND constraint_type = 'FOREIGN KEY'
+       LIMIT 1`,
+      [table, name]
+    );
+    if (foreignKeys.length > 0) {
+      await trx.raw('ALTER TABLE ?? DROP FOREIGN KEY ??', [table, name]);
+      dropped = true;
+    }
+
+    const [indexes] = await trx.raw(
+      `SELECT 1
+       FROM information_schema.statistics
+       WHERE table_schema = database() AND table_name = ? AND index_name = ?
+       LIMIT 1`,
+      [table, name]
+    );
+    if (indexes.length > 0) {
+      await trx.raw('ALTER TABLE ?? DROP INDEX ??', [table, name]);
+      dropped = true;
+    }
+
+    return dropped;
   }
 
   transformErrors(error: Error) {

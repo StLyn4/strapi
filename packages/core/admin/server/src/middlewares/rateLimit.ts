@@ -1,12 +1,13 @@
+import { get, isString, has } from 'lodash';
 import type { Context, Next } from 'koa';
 import path from 'path';
-import utils from '@strapi/utils';
-import { isString, has, toLower } from 'lodash/fp';
-import type { Strapi } from '@strapi/types';
+import { errors } from '@strapi/utils';
 
-const { RateLimitError } = utils.errors;
+import type { Core } from '@strapi/types';
 
-export default (config: any, { strapi }: { strapi: Strapi }) =>
+const { RateLimitError } = errors;
+
+export default (config: any, { strapi }: { strapi: Core.Strapi }) =>
   async (ctx: Context, next: Next) => {
     let rateLimitConfig = strapi.config.get('admin.rateLimit') as any;
 
@@ -16,7 +17,7 @@ export default (config: any, { strapi }: { strapi: Strapi }) =>
       };
     }
 
-    if (!has('enabled', rateLimitConfig)) {
+    if (!has(rateLimitConfig, 'enabled')) {
       rateLimitConfig.enabled = true;
     }
 
@@ -25,9 +26,11 @@ export default (config: any, { strapi }: { strapi: Strapi }) =>
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const rateLimit = require('koa2-ratelimit').RateLimit;
 
-      const userEmail = toLower(ctx.request.body.email) || 'unknownEmail';
+      const requestEmail = get(ctx, 'request.body.email');
+      const userEmail = isString(requestEmail) ? requestEmail.toLowerCase() : 'unknownEmail';
+
       const requestPath = isString(ctx.request.path)
-        ? toLower(path.normalize(ctx.request.path)).replace(/\/$/, '')
+        ? path.normalize(ctx.request.path).toLowerCase().replace(/\/$/, '')
         : 'invalidPath';
 
       const loadConfig = {

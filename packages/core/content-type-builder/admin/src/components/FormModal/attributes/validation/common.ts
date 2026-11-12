@@ -1,5 +1,5 @@
-import { translatedErrors as errorsTrads } from '@strapi/helper-plugin';
-import { snakeCase } from 'lodash/fp';
+import { translatedErrors as errorsTrads } from '@strapi/admin/strapi-admin';
+import snakeCase from 'lodash/snakeCase';
 import toNumber from 'lodash/toNumber';
 import * as yup from 'yup';
 
@@ -12,7 +12,7 @@ const alreadyUsedAttributeNames = (
 ): yup.TestConfig<string | undefined, Record<string, unknown>> => {
   return {
     name: 'attributeNameAlreadyUsed',
-    message: errorsTrads.unique,
+    message: errorsTrads.unique.id,
     test(value: string | undefined) {
       if (!value) {
         return false;
@@ -20,7 +20,6 @@ const alreadyUsedAttributeNames = (
       const snakeCaseKey = snakeCase(value);
 
       return !usedNames.some((existingKey) => {
-        if (existingKey === value) return false; // don't compare against itself
         return snakeCase(existingKey) === snakeCaseKey;
       });
     },
@@ -28,11 +27,11 @@ const alreadyUsedAttributeNames = (
 };
 
 const getUsedContentTypeAttributeNames = (
-  ctShema: any,
+  ctShema: { attributes?: Record<string, unknown> },
   isEdition: boolean,
   attributeNameToEdit: string
 ) => {
-  const attributes = ctShema?.schema?.attributes ?? {};
+  const attributes = ctShema?.attributes ?? {};
 
   return Object.keys(attributes).filter((attr) => {
     if (isEdition) {
@@ -78,11 +77,18 @@ const validators = {
       })
       .nullable(),
   maxLength: () => yup.number().integer().positive(getTrad('error.validation.positive')).nullable(),
+  maxLengthString: () =>
+    yup
+      .number()
+      .integer()
+      .positive(getTrad('error.validation.positive'))
+      .max(255, 'Maximum length for short text fields is 255 characters')
+      .nullable(),
   minLength: () =>
     yup
       .number()
       .integer()
-      .min(0)
+      .min(1)
       .when('maxLength', (maxLength, schema) => {
         if (maxLength) {
           return schema.max(maxLength, getTrad('error.validation.minSupMax'));
@@ -96,11 +102,11 @@ const validators = {
       .string()
       .test(alreadyUsedAttributeNames(usedNames))
       .test(isNameAllowed(reservedNames))
-      .matches(NAME_REGEX, errorsTrads.regex)
-      .required(errorsTrads.required);
+      .matches(NAME_REGEX, errorsTrads.regex.id)
+      .required(errorsTrads.required.id);
   },
   required: () => yup.boolean(),
-  type: () => yup.string().required(errorsTrads.required),
+  type: () => yup.string().required(errorsTrads.required.id),
   unique: () => yup.boolean().nullable(),
 };
 
@@ -119,7 +125,41 @@ const createTextShape = (usedAttributeNames: Array<string>, reservedNames: Array
         name: 'isValidRegExpPattern',
         message: getTrad('error.validation.regex'),
         test(value) {
-          return new RegExp(value || '') !== null;
+          try {
+            new RegExp(value || '');
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      })
+      .nullable(),
+  };
+
+  return shape;
+};
+
+const createStringShape = (usedAttributeNames: Array<string>, reservedNames: Array<string>) => {
+  const shape = {
+    name: validators.name(usedAttributeNames, reservedNames),
+    type: validators.type(),
+    default: validators.default(),
+    unique: validators.unique(),
+    required: validators.required(),
+    maxLength: validators.maxLengthString(),
+    minLength: validators.minLength(),
+    regex: yup
+      .string()
+      .test({
+        name: 'isValidRegExpPattern',
+        message: getTrad('error.validation.regex'),
+        test(value) {
+          try {
+            new RegExp(value || '');
+            return true;
+          } catch {
+            return false;
+          }
         },
       })
       .nullable(),
@@ -134,7 +174,7 @@ type GenericIsMinSuperiorThanMax<T extends (string | null) | number> = yup.TestC
 >;
 
 const isMinSuperiorThanMax = <
-  T extends (string | null) | number
+  T extends (string | null) | number,
 >(): GenericIsMinSuperiorThanMax<T> => ({
   name: 'isMinSuperiorThanMax',
   message: getTrad('error.validation.minSupMax'),
@@ -143,7 +183,7 @@ const isMinSuperiorThanMax = <
       return true;
     }
 
-    const { max } = (this as any).parent;
+    const { max } = this.parent as { max?: T };
 
     if (!max) {
       return true;
@@ -159,6 +199,7 @@ const isMinSuperiorThanMax = <
 
 export {
   alreadyUsedAttributeNames,
+  createStringShape,
   createTextShape,
   getUsedContentTypeAttributeNames,
   isMinSuperiorThanMax,

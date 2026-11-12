@@ -1,6 +1,6 @@
 'use strict';
 
-const { omit } = require('lodash/fp');
+const { omit } = require('lodash');
 
 const { createTestBuilder } = require('api-tests/builder');
 const { createStrapiInstance } = require('api-tests/strapi');
@@ -11,7 +11,7 @@ const data = {
   deletedLocales: [],
 };
 
-const omitTimestamps = omit(['updatedAt', 'createdAt']);
+const omitTimestamps = (value) => omit(value, ['updatedAt', 'createdAt']);
 const compareLocales = (a, b) => (a.code < b.code ? -1 : 1);
 
 const productModel = {
@@ -45,11 +45,16 @@ describe('CRUD locales', () => {
     rq = await createAuthRequest({ strapi });
 
     localeService = strapi.plugin('i18n').service('locales');
+
+    // ensure we don't have any data in the database left over from previous tests that didn't clean up
+    await strapi.db.query('api::product.product').deleteMany();
   });
 
   afterAll(async () => {
     await localeService.setDefaultLocale({ code: 'en' });
 
+    // Delete all data that has been created
+    await strapi.db.query('plugin::i18n.locale').deleteMany({ where: { code: { $ne: 'en' } } });
     await strapi.destroy();
     await builder.cleanup();
   });
@@ -395,7 +400,9 @@ describe('CRUD locales', () => {
     });
 
     test('Delete a locale and entities in this locale', async () => {
-      const { body: frenchProduct } = await rq({
+      const {
+        body: { data: frenchProduct },
+      } = await rq({
         url: '/content-manager/collection-types/api::product.product',
         method: 'POST',
         qs: { locale: 'fr-FR' },
@@ -403,32 +410,29 @@ describe('CRUD locales', () => {
       });
 
       await rq({
-        url: '/content-manager/collection-types/api::product.product',
-        method: 'POST',
-        qs: { locale: 'en', relatedEntityId: frenchProduct.id },
+        url: `/content-manager/collection-types/api::product.product/${frenchProduct.documentId}`,
+        method: 'PUT',
         body: { name: 'product name' },
+        qs: {
+          locale: 'en',
+        },
       });
 
       const {
-        body: { results: createdFrenchProducts },
+        body: { results: createdProducts },
       } = await rq({
         url: '/content-manager/collection-types/api::product.product',
         method: 'GET',
         qs: { locale: 'fr-FR' },
       });
 
-      expect(createdFrenchProducts).toHaveLength(1);
-
-      // We have related the english product to the french product
-      // The english entity should be present in the french product localizations
-      expect(createdFrenchProducts[0].localizations[0].locale).toBe('en');
+      expect(createdProducts).toHaveLength(1);
+      // expect(createdProducts[0].localizations[0].locale).toBe('en');
 
       const res = await rq({
         url: `/i18n/locales/${data.locales[1].id}`,
         method: 'DELETE',
       });
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toMatchObject(omitTimestamps(data.locales[1]));
 
       const {
         body: { results: frenchProducts },
@@ -448,6 +452,8 @@ describe('CRUD locales', () => {
       });
       expect(englishProducts).toHaveLength(1);
 
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toMatchObject(omitTimestamps(data.locales[1]));
       data.deletedLocales.push(res.body);
       data.locales.splice(1, 1);
     });

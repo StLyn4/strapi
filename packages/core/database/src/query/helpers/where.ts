@@ -1,16 +1,19 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
-import { isArray, castArray, keys, isPlainObject } from 'lodash/fp';
+import { castArray, isPlainObject } from 'lodash';
 import type { Knex } from 'knex';
 
-import { isOperatorOfType } from '@strapi/utils';
+import { isOperator, isOperatorOfType } from '@strapi/utils';
 import * as types from '../../utils/types';
 import { createField } from '../../fields';
 import { createJoin } from './join';
 import { toColumnName } from './transform';
+import { escapeQuery } from './search';
 import { isKnexQuery } from '../../utils/knex';
 
 import type { Ctx } from '../types';
 import type { Attribute } from '../../types';
+
+type WhereCtx = Ctx & { alias?: string; isGroupRoot?: boolean };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => isPlainObject(value);
 
@@ -22,7 +25,7 @@ const castValue = (value: unknown, attribute: Attribute | null) => {
   if (types.isScalar(attribute.type) && !isKnexQuery(value)) {
     const field = createField(attribute);
 
-    return value === null ? null : field.toDB(value);
+    return value === null ? null : field.toFilterValue(value);
   }
 
   return value;
@@ -57,7 +60,7 @@ const processSingleAttributeWhere = (
 };
 
 const processAttributeWhere = (attribute: Attribute | null, where: unknown, operator = '$eq') => {
-  if (isArray(where)) {
+  if (Array.isArray(where)) {
     return where.map((sub) => processSingleAttributeWhere(attribute, sub, operator));
   }
 
@@ -72,7 +75,39 @@ const processNested = (where: unknown, ctx: WhereCtx) => {
   return processWhere(where, ctx);
 };
 
-type WhereCtx = Ctx & { alias?: string };
+const processRelationWhere = (where: unknown, ctx: WhereCtx) => {
+  const { qb, alias } = ctx;
+
+  const idAlias = qb.aliasColumn('id', alias);
+  if (!isRecord(where)) {
+    return { [idAlias]: where };
+  }
+
+  const keys = Object.keys(where);
+  const operatorKeys = keys.filter((key) => isOperator(key));
+
+  if (operatorKeys.length > 0 && operatorKeys.length !== keys.length) {
+    throw new Error(`Operator and non-operator keys cannot be mixed in a relation where clause`);
+  }
+
+  if (operatorKeys.length > 1) {
+    throw new Error(
+      `Only one operator key is allowed in a relation where clause, but found: ${operatorKeys}`
+    );
+  }
+
+  if (operatorKeys.length === 1) {
+    const operator = operatorKeys[0];
+
+    if (isOperatorOfType('group', operator)) {
+      return processWhere(where, ctx);
+    }
+
+    return { [idAlias]: { [operator]: processNested(where[operator], ctx) } };
+  }
+
+  return processWhere(where, ctx);
+};
 
 /**
  * Process where parameter
@@ -83,11 +118,11 @@ function processWhere(
   where: Record<string, unknown> | Record<string, unknown>[],
   ctx: WhereCtx
 ): Record<string, unknown> | Record<string, unknown>[] {
-  if (!isArray(where) && !isRecord(where)) {
+  if (!Array.isArray(where) && !isRecord(where)) {
     throw new Error('Where must be an array or an object');
   }
 
-  if (isArray(where)) {
+  if (Array.isArray(where)) {
     return where.map((sub) => processWhere(sub, ctx));
   }
 
@@ -100,8 +135,12 @@ function processWhere(
   for (const key of Object.keys(where)) {
     const value = where[key];
 
-    // if operator $and $or then loop over them
-    if (isOperatorOfType('group', key) && Array.isArray(value)) {
+    // if operator $and $or -> process recursively
+    if (isOperatorOfType('group', key)) {
+      if (!Array.isArray(value)) {
+        throw new Error(`Operator ${key} must be an array`);
+      }
+
       filters[key] = value.map((sub) => processNested(sub, ctx));
       continue;
     }
@@ -132,16 +171,12 @@ function processWhere(
         attribute,
       });
 
-      let nestedWhere = processNested(value, {
+      const nestedWhere = processRelationWhere(value, {
         db,
         qb,
         alias: subAlias,
         uid: attribute.target,
       });
-
-      if (!isRecord(nestedWhere) || isOperatorOfType('where', keys(nestedWhere)[0])) {
-        nestedWhere = { [qb.aliasColumn('id', subAlias)]: nestedWhere };
-      }
 
       // TODO: use a better merge logic (push to $and when collisions)
       Object.assign(filters, nestedWhere);
@@ -190,7 +225,12 @@ type Operator =
   | '$jsonSupersetOf';
 
 // TODO: add type casting per operator at some point
-const applyOperator = (qb: Knex.QueryBuilder, column: any, operator: Operator, value: any) => {
+const applyOperator = (
+  qb: Knex.QueryBuilder,
+  column: any,
+  operator: Operator,
+  value: any
+): Knex.QueryBuilder | undefined => {
   if (Array.isArray(value) && !isOperatorOfType('array', operator)) {
     return qb.where((subQB) => {
       value.forEach((subValue) =>
@@ -210,14 +250,14 @@ const applyOperator = (qb: Knex.QueryBuilder, column: any, operator: Operator, v
     case '$in': {
       // @ts-ignore
       // TODO: fix in v5
-      qb.whereIn(column, isKnexQuery(value) ? value : castArray(value));
+      qb.whereIn(column, isKnexQuery(value) ? value : [...castArray(value)]);
       break;
     }
 
     case '$notIn': {
       // @ts-ignore
       // TODO: fix in v5
-      qb.whereNotIn(column, isKnexQuery(value) ? value : castArray(value));
+      qb.whereNotIn(column, isKnexQuery(value) ? value : [...castArray(value)]);
       break;
     }
 
@@ -236,7 +276,7 @@ const applyOperator = (qb: Knex.QueryBuilder, column: any, operator: Operator, v
         qb.whereNull(column);
         break;
       }
-      qb.whereRaw(`${fieldLowerFn(qb)} LIKE LOWER(?)`, [column, `${value}`]);
+      qb.whereRaw(`${fieldLowerFn(qb)} = LOWER(?)`, [column, `${value}`]);
       break;
     }
     case '$ne': {
@@ -253,7 +293,7 @@ const applyOperator = (qb: Knex.QueryBuilder, column: any, operator: Operator, v
         qb.whereNotNull(column);
         break;
       }
-      qb.whereRaw(`${fieldLowerFn(qb)} NOT LIKE LOWER(?)`, [column, `${value}`]);
+      qb.whereRaw(`${fieldLowerFn(qb)} <> LOWER(?)`, [column, `${value}`]);
       break;
     }
     case '$gt': {
@@ -293,38 +333,50 @@ const applyOperator = (qb: Knex.QueryBuilder, column: any, operator: Operator, v
       break;
     }
     case '$startsWith': {
-      qb.where(column, 'like', `${value}%`);
+      qb.whereRaw(`?? LIKE ?${likeEscapeClause(qb)}`, [column, `${escapeLike(value)}%`]);
       break;
     }
     case '$startsWithi': {
-      qb.whereRaw(`${fieldLowerFn(qb)} LIKE LOWER(?)`, [column, `${value}%`]);
+      qb.whereRaw(`${fieldLowerFn(qb)} LIKE LOWER(?)${likeEscapeClause(qb)}`, [
+        column,
+        `${escapeLike(value)}%`,
+      ]);
       break;
     }
     case '$endsWith': {
-      qb.where(column, 'like', `%${value}`);
+      qb.whereRaw(`?? LIKE ?${likeEscapeClause(qb)}`, [column, `%${escapeLike(value)}`]);
       break;
     }
     case '$endsWithi': {
-      qb.whereRaw(`${fieldLowerFn(qb)} LIKE LOWER(?)`, [column, `%${value}`]);
+      qb.whereRaw(`${fieldLowerFn(qb)} LIKE LOWER(?)${likeEscapeClause(qb)}`, [
+        column,
+        `%${escapeLike(value)}`,
+      ]);
       break;
     }
     case '$contains': {
-      qb.where(column, 'like', `%${value}%`);
+      qb.whereRaw(`?? LIKE ?${likeEscapeClause(qb)}`, [column, `%${escapeLike(value)}%`]);
       break;
     }
 
     case '$notContains': {
-      qb.whereNot(column, 'like', `%${value}%`);
+      qb.whereRaw(`?? NOT LIKE ?${likeEscapeClause(qb)}`, [column, `%${escapeLike(value)}%`]);
       break;
     }
 
     case '$containsi': {
-      qb.whereRaw(`${fieldLowerFn(qb)} LIKE LOWER(?)`, [column, `%${value}%`]);
+      qb.whereRaw(`${fieldLowerFn(qb)} LIKE LOWER(?)${likeEscapeClause(qb)}`, [
+        column,
+        `%${escapeLike(value)}%`,
+      ]);
       break;
     }
 
     case '$notContainsi': {
-      qb.whereRaw(`${fieldLowerFn(qb)} NOT LIKE LOWER(?)`, [column, `%${value}%`]);
+      qb.whereRaw(`${fieldLowerFn(qb)} NOT LIKE LOWER(?)${likeEscapeClause(qb)}`, [
+        column,
+        `%${escapeLike(value)}%`,
+      ]);
       break;
     }
 
@@ -377,12 +429,12 @@ type Where =
     }
   | Array<Where>;
 
-const applyWhere = (qb: Knex.QueryBuilder, where: Where) => {
-  if (!isArray(where) && !isRecord(where)) {
+const applyWhere = (qb: Knex.QueryBuilder, where: Where): Knex.QueryBuilder | undefined => {
+  if (!Array.isArray(where) && !isRecord(where)) {
     throw new Error('Where must be an array or an object');
   }
 
-  if (isArray(where)) {
+  if (Array.isArray(where)) {
     return qb.where((subQB: Knex.QueryBuilder) =>
       where.forEach((subWhere) => applyWhere(subQB, subWhere))
     );
@@ -417,11 +469,66 @@ const applyWhere = (qb: Knex.QueryBuilder, where: Where) => {
 
 const fieldLowerFn = (qb: Knex.QueryBuilder) => {
   // Postgres requires string to be passed
-  if (qb.client.config.client === 'postgres') {
+  if (qb.client.dialect === 'postgresql') {
     return 'LOWER(CAST(?? AS VARCHAR))';
   }
 
   return 'LOWER(??)';
 };
 
-export { applyWhere, processWhere };
+// SQL LIKE wildcards (and the backslash escape character itself) that must be
+// escaped so a user-supplied value is matched literally instead of as a pattern.
+const LIKE_SPECIAL_CHARS = '%_\\';
+
+const escapeLike = (value: unknown) => escapeQuery(`${value}`, LIKE_SPECIAL_CHARS);
+
+// SQLite has no default LIKE escape character and requires an explicit clause.
+// PostgreSQL and MySQL both default to backslash, matching helpers/search.ts.
+const likeEscapeClause = (qb: Knex.QueryBuilder) =>
+  qb.client.dialect === 'sqlite3' ? " ESCAPE '\\'" : '';
+
+/**
+ * Prefix unaliased root column keys with `alias` (e.g. `published_at` → `t0.published_at`).
+ * Used for update/delete subqueries that join other tables sharing column names.
+ * Group operators are walked; already-qualified keys (`t1.title`) and operator keys are left as-is.
+ */
+function qualifyRootColumns(where: Record<string, unknown>, alias: string): Record<string, unknown>;
+function qualifyRootColumns(
+  where: Record<string, unknown>[],
+  alias: string
+): Record<string, unknown>[];
+function qualifyRootColumns(
+  where: Record<string, unknown> | Record<string, unknown>[],
+  alias: string
+): Record<string, unknown> | Record<string, unknown>[] {
+  if (Array.isArray(where)) {
+    return where.map((sub) => qualifyRootColumns(sub, alias));
+  }
+
+  const result: Record<string, unknown> = {};
+
+  for (const key of Object.keys(where)) {
+    const value = where[key];
+
+    if (isOperatorOfType('group', key)) {
+      if (Array.isArray(value)) {
+        result[key] = value.map((sub) => (isRecord(sub) ? qualifyRootColumns(sub, alias) : sub));
+      } else {
+        result[key] = value;
+      }
+      continue;
+    }
+
+    if (key === '$not' && isRecord(value)) {
+      result[key] = qualifyRootColumns(value, alias);
+      continue;
+    }
+
+    const qualifiedKey = key.includes('.') || isOperator(key) ? key : `${alias}.${key}`;
+    result[qualifiedKey] = value;
+  }
+
+  return result;
+}
+
+export { applyWhere, processWhere, qualifyRootColumns };

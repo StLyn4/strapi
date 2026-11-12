@@ -1,37 +1,58 @@
-import { Icon } from '@strapi/design-system';
-import {
-  SubNav,
-  SubNavHeader,
-  SubNavLink,
-  SubNavSection,
-  SubNavSections,
-} from '@strapi/design-system/v2';
-import { useTracking } from '@strapi/helper-plugin';
-import { Lock } from '@strapi/icons';
+import { Badge, Divider } from '@strapi/design-system';
+import { Lightning } from '@strapi/icons';
 import { useIntl } from 'react-intl';
-import { NavLink, useLocation } from 'react-router-dom';
-import styled from 'styled-components';
+import { useLocation } from 'react-router-dom';
+import { styled } from 'styled-components';
 
-import { SettingsMenu } from '../../../hooks/useSettingsMenu';
+import { useLicenseLimits } from '../../../../../ee/admin/src/hooks/useLicenseLimits';
+import { SubNav } from '../../../components/SubNav';
+import { useTracking } from '../../../features/Tracking';
+import { useSettingsMenu } from '../../../hooks/useSettingsMenu';
 
-/**
- * TODO: refactor the SubNav entirely, we shouldn't have
- * to do this hack to work a lock at the end. It's a bit hacky.
- */
+type LinkId =
+  | 'content-releases'
+  | 'review-workflows'
+  | 'sso'
+  | 'auditLogs'
+  | 'auditLogs-purchase-page'
+  | 'sso-purchase-page'
+  | 'content-history-purchase-page';
 
-const CustomIcon = styled(Icon)`
-  right: 15px;
-  position: absolute;
+type FeatureName =
+  'cms-content-releases' | 'review-workflows' | 'sso' | 'audit-logs' | 'cms-content-history';
+
+const StyledBadge = styled(Badge)`
+  border-radius: 50%;
+  padding: ${({ theme }) => theme.spaces[2]};
+  height: 2rem;
 `;
 
-interface SettingsNavProps {
-  menu: SettingsMenu;
-}
-
-const SettingsNav = ({ menu }: SettingsNavProps) => {
+const SettingsNav = ({ isFullPage = false }: { isFullPage?: boolean }) => {
+  const { menu } = useSettingsMenu();
   const { formatMessage } = useIntl();
   const { trackUsage } = useTracking();
   const { pathname } = useLocation();
+  const { license } = useLicenseLimits();
+
+  // The live license's features, plus what a lapsed license granted: the same availability the
+  // Plan card shows, kept until the license key or file is removed.
+  const availableFeatureNames = [
+    ...(license?.features ?? []).map((feature) => feature.name),
+    ...(license?.planEntitlements ?? [])
+      .filter((entitlement) => entitlement.available)
+      .map((entitlement) => entitlement.feature),
+  ];
+
+  const linksIdsToLicenseFeaturesNames: Record<LinkId, FeatureName> = {
+    'content-releases': 'cms-content-releases',
+    'review-workflows': 'review-workflows',
+    sso: 'sso',
+    auditLogs: 'audit-logs',
+    'auditLogs-purchase-page': 'audit-logs',
+    // A lapsed license renders these as purchase links, under their own ids
+    'sso-purchase-page': 'sso',
+    'content-history-purchase-page': 'cms-content-history',
+  };
 
   const filteredMenu = menu.filter(
     (section) => !section.links.every((link) => link.isDisplayed === false)
@@ -44,8 +65,10 @@ const SettingsNav = ({ menu }: SettingsNavProps) => {
       links: section.links.map((link) => {
         return {
           ...link,
+          id: link.id as LinkId,
           title: link.intlLabel,
           name: link.id,
+          to: link.to.startsWith('/') ? link.to : `/settings/${link.to}`,
         };
       }),
     };
@@ -61,34 +84,67 @@ const SettingsNav = ({ menu }: SettingsNavProps) => {
   };
 
   return (
-    <SubNav ariaLabel={label}>
-      <SubNavHeader label={label} />
-      <SubNavSections>
-        {sections.map((section) => (
-          <SubNavSection key={section.id} label={formatMessage(section.intlLabel)}>
-            {section.links.map((link) => {
-              return (
-                <SubNavLink
-                  as={NavLink}
-                  withBullet={link.hasNotification}
-                  // @ts-expect-error – this is an issue with the DS where as props are not inferred
-                  to={link.to}
-                  onClick={handleClickOnLink(link.to)}
-                  key={link.id}
-                >
-                  {formatMessage(link.intlLabel)}
-                  {link?.lockIcon && (
-                    <CustomIcon width={`${15 / 16}rem`} height={`${15 / 16}rem`} as={Lock} />
-                  )}
-                </SubNavLink>
-              );
-            })}
-          </SubNavSection>
-        ))}
-      </SubNavSections>
-    </SubNav>
+    <SubNav.Main aria-label={label}>
+      {!isFullPage && (
+        <>
+          <SubNav.Header label={label} />
+          <Divider />
+        </>
+      )}
+      <SubNav.Content>
+        {isFullPage && (
+          <>
+            <SubNav.Header label={label} />
+            <Divider />
+          </>
+        )}
+        <SubNav.Sections>
+          {sections.map((section) => (
+            <SubNav.Section key={section.id} label={formatMessage(section.intlLabel)}>
+              {section.links.map((link) => {
+                return (
+                  <SubNav.Link
+                    to={link.to}
+                    onClick={handleClickOnLink(link.to)}
+                    key={link.id}
+                    label={formatMessage(link.intlLabel)}
+                    endAction={
+                      <>
+                        {link?.licenseOnly && (
+                          <Lightning
+                            fill={
+                              (availableFeatureNames || []).includes(
+                                linksIdsToLicenseFeaturesNames[link.id]
+                              )
+                                ? 'primary600'
+                                : 'neutral300'
+                            }
+                            width="1.5rem"
+                            height="1.5rem"
+                          />
+                        )}
+                        {link?.hasNotification && (
+                          <StyledBadge
+                            aria-label="Notification"
+                            backgroundColor="primary600"
+                            textColor="neutral0"
+                          >
+                            1
+                          </StyledBadge>
+                        )}
+                      </>
+                    }
+                  >
+                    {formatMessage(link.intlLabel)}
+                  </SubNav.Link>
+                );
+              })}
+            </SubNav.Section>
+          ))}
+        </SubNav.Sections>
+      </SubNav.Content>
+    </SubNav.Main>
   );
 };
 
 export { SettingsNav };
-export type { SettingsNavProps };

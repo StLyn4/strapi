@@ -1,3 +1,6 @@
+/** @import { Core } from '@strapi/strapi' */
+
+/** @type {Core.Config.Database<'sqlite'>['connection']} */
 const sqlite = {
   client: 'sqlite',
   connection: {
@@ -6,6 +9,7 @@ const sqlite = {
   useNullAsDefault: true,
 };
 
+/** @type {Core.Config.Database<'postgres'>['connection']} */
 const postgres = {
   client: 'postgres',
   connection: {
@@ -17,6 +21,7 @@ const postgres = {
   },
 };
 
+/** @type {Core.Config.Database<'mysql'>['connection']} */
 const mysql = {
   client: 'mysql',
   connection: {
@@ -28,17 +33,7 @@ const mysql = {
   },
 };
 
-const mysql2 = {
-  client: 'mysql2',
-  connection: {
-    database: 'strapi',
-    user: 'strapi',
-    password: 'strapi',
-    port: 3306,
-    host: 'localhost',
-  },
-};
-
+/** @type {Core.Config.Database<'mysql'>['connection']} */
 const mariadb = {
   client: 'mysql',
   connection: {
@@ -52,7 +47,6 @@ const mariadb = {
 
 const db = {
   mysql,
-  mysql2,
   sqlite,
   postgres,
   mariadb,

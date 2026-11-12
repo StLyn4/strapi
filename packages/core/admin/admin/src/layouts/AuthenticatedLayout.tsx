@@ -1,0 +1,146 @@
+import * as React from 'react';
+
+import packageInfo from '@strapi/admin/package.json';
+import { Box, Flex, SkipToContent } from '@strapi/design-system';
+import { DndProvider } from 'react-dnd';
+import { HTML5Backend } from 'react-dnd-html5-backend';
+import { useIntl } from 'react-intl';
+
+import { LazyOutlet } from '../components/LazyOutlet';
+import { LeftMenu } from '../components/LeftMenu';
+import { NpsSurvey } from '../components/NpsSurvey';
+import { Page } from '../components/PageHelpers';
+import { PluginsInitializer } from '../components/PluginsInitializer';
+import { PrivateRoute } from '../components/PrivateRoute';
+import { TopBanners } from '../components/TopBanners';
+import { AppInfoProvider } from '../features/AppInfo';
+import { useAuth } from '../features/Auth';
+import { useConfiguration } from '../features/Configuration';
+import { useMenu } from '../hooks/useMenu';
+import { useInformationQuery } from '../services/admin';
+import { getStrapiUpdateInfo } from '../utils/strapiUpdate';
+
+import { useAuthenticatedAccessTracking } from './useAuthenticatedAccessTracking';
+import { useHashedAdminUserId } from './useHashedAdminUserId';
+
+const { version: strapiVersion } = packageInfo;
+
+const AdminLayout = () => {
+  const { formatMessage } = useIntl();
+  const userInfo = useAuth('AuthenticatedApp', (state) => state.user);
+  const userId = useHashedAdminUserId(userInfo);
+  const { showReleaseNotification } = useConfiguration('AuthenticatedApp');
+
+  const { data: appInfo, isLoading: isLoadingAppInfo } = useInformationQuery();
+  const [tagName, setTagName] = React.useState<string>(strapiVersion);
+
+  React.useEffect(() => {
+    if (showReleaseNotification) {
+      fetch('https://api.github.com/repos/strapi/strapi/releases/latest')
+        .then(async (res) => {
+          if (!res.ok) {
+            return;
+          }
+
+          const response = (await res.json()) as { tag_name: string | null | undefined };
+
+          if (!response.tag_name) {
+            throw new Error();
+          }
+
+          setTagName(response.tag_name);
+        })
+        .catch(() => {
+          /**
+           * silence is golden & we'll use the strapiVersion as a fallback
+           */
+        });
+    }
+  }, [showReleaseNotification]);
+
+  const strapiUpdate = getStrapiUpdateInfo(strapiVersion, tagName);
+
+  const {
+    isLoading: isLoadingMenu,
+    generalSectionLinks,
+    pluginsSectionLinks,
+    topMobileNavigation,
+    burgerMobileNavigation,
+  } = useMenu(strapiUpdate.severity, appInfo?.currentEnvironment);
+
+  const projectId = appInfo?.projectId;
+  useAuthenticatedAccessTracking(projectId);
+
+  // We don't need to wait for the release query to be fetched before rendering the plugins
+  // however, we need the appInfos and the permissions
+  if (isLoadingMenu || isLoadingAppInfo) {
+    return <Page.Loading />;
+  }
+
+  return (
+    <AppInfoProvider
+      {...appInfo}
+      userId={userId}
+      latestStrapiReleaseTag={tagName}
+      shouldUpdateStrapi={strapiUpdate.severity !== 'none'}
+      strapiUpdateSeverity={strapiUpdate.severity}
+      strapiReleasesBehind={strapiUpdate.releasesBehind}
+      isStrapiMajorBehind={strapiUpdate.isMajorBehind}
+    >
+      <NpsSurvey />
+      <PluginsInitializer>
+        <DndProvider backend={HTML5Backend}>
+          <Box background="neutral100">
+            <SkipToContent>
+              {formatMessage({ id: 'skipToContent', defaultMessage: 'Skip to content' })}
+            </SkipToContent>
+            <Flex
+              height="100dvh"
+              direction={{
+                initial: 'column',
+                large: 'row',
+              }}
+              alignItems="flex-start"
+            >
+              <LeftMenu
+                generalSectionLinks={generalSectionLinks}
+                pluginsSectionLinks={pluginsSectionLinks}
+                topMobileNavigation={topMobileNavigation}
+                burgerMobileNavigation={burgerMobileNavigation}
+              />
+              <Flex
+                direction="column"
+                alignItems="stretch"
+                flex={1}
+                overflow="auto"
+                width="100%"
+                height={{
+                  initial: 'auto',
+                  large: '100%',
+                }}
+              >
+                <TopBanners />
+                {/*
+                 * Top-level Suspense only — nested layouts (Settings, Content Manager) use
+                 * LazyOutlet with useNavigation so in-app navigations show loading in the content
+                 * column without hiding section side navs.
+                 */}
+                <LazyOutlet suspenseOnly />
+              </Flex>
+            </Flex>
+          </Box>
+        </DndProvider>
+      </PluginsInitializer>
+    </AppInfoProvider>
+  );
+};
+
+const PrivateAdminLayout = () => {
+  return (
+    <PrivateRoute>
+      <AdminLayout />
+    </PrivateRoute>
+  );
+};
+
+export { AdminLayout, PrivateAdminLayout };

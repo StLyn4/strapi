@@ -1,23 +1,42 @@
-import type { Readable } from 'stream';
+import type { Stats } from 'node:fs';
+import type { Duplex, Readable } from 'stream';
 
 import zip from 'zlib';
 import path from 'path';
 import { pipeline, PassThrough } from 'stream';
+import { finished } from 'stream/promises';
 import fs from 'fs-extra';
-import tar from 'tar';
-import { isEmpty, keyBy } from 'lodash/fp';
-import { chain } from 'stream-chain';
-import { parser } from 'stream-json/jsonl/Parser';
-import type { Schema } from '@strapi/types';
+import { Parser, type ReadEntry } from 'tar';
+import { isEmpty, keyBy } from 'lodash';
+import type { Struct } from '@strapi/types';
 
-import type { IAsset, IMetadata, ISourceProvider, ProviderType, IFile } from '../../../../types';
+import type {
+  IAsset,
+  IMetadata,
+  ISourceProvider,
+  ProviderType,
+  IFile,
+  TransferStage,
+} from '../../../types';
+import type { IDiagnosticReporter } from '../../../utils/diagnostic';
 
-import { createDecryptionCipher } from '../../../utils/encryption';
-import { collect } from '../../../utils/stream';
-import { ProviderInitializationError, ProviderTransferError } from '../../../errors/providers';
-import { isFilePathInDirname, isPathEquivalent, unknownPathToPosix } from './utils';
+import * as utils from '../../../utils';
+import { write } from '../../../utils/writable-async-write';
+import { loadStreamDeps } from '../../../utils/esm-deps';
+import { errorFromUnknown, errorMessageFromUnknown } from '../../../utils/unknown-error';
+import {
+  ProviderInitializationError,
+  ProviderTransferError,
+  ProviderValidationError,
+} from '../../../errors/providers';
+import {
+  isFilePathInDirname,
+  isPathEquivalent,
+  unknownPathToPosix,
+  validateAssetMetadata,
+} from './utils';
 
-type StreamItemArray = Parameters<typeof chain>[0];
+type StreamItemArray = Array<Readable | Duplex>;
 
 /**
  * Constant for the metadata file path
@@ -55,6 +74,10 @@ class LocalFileSourceProvider implements ISourceProvider {
 
   #metadata?: IMetadata;
 
+  #assetMetadata?: Map<string, IFile>;
+
+  #diagnostics?: IDiagnosticReporter;
+
   constructor(options: ILocalFileSourceProviderOptions) {
     this.options = options;
 
@@ -65,17 +88,56 @@ class LocalFileSourceProvider implements ISourceProvider {
     }
   }
 
+  #reportInfo(message: string) {
+    this.#diagnostics?.report({
+      details: {
+        createdAt: new Date(),
+        message,
+        origin: 'file-source-provider',
+      },
+      kind: 'info',
+    });
+  }
+
+  /**
+   * tar `Parser` invokes the pipeline completion callback when the archive ends, but it does not
+   * reliably await async `onReadEntry` — defer `end` until outstanding async entry work is done.
+   */
+  #endPassThroughWhenTarIdle(
+    outStream: PassThrough,
+    activeAsyncEntries: () => number,
+    err?: Error | null
+  ) {
+    if (err) {
+      outStream.destroy(err);
+      return;
+    }
+    const tick = () => {
+      if (activeAsyncEntries() === 0) {
+        outStream.end();
+      } else {
+        setImmediate(tick);
+      }
+    };
+    tick();
+  }
+
   /**
    * Pre flight checks regarding the provided options, making sure that the file can be opened (decrypted, decompressed), etc.
    */
-  async bootstrap() {
+  async bootstrap(diagnostics: IDiagnosticReporter) {
+    this.#diagnostics = diagnostics;
     const { path: filePath } = this.options.file;
+
+    // The catch below maps every failure to a bad file or key. Load the stream
+    // packages first so a missing dependency keeps its own message and stack.
+    await loadStreamDeps();
 
     try {
       // Read the metadata to ensure the file can be parsed
       await this.#loadMetadata();
       // TODO: we might also need to read the schema.jsonl files & implements a custom stream-check
-    } catch (e) {
+    } catch {
       if (this.options?.encryption?.enabled) {
         throw new ProviderInitializationError(
           `Key is incorrect or the file '${filePath}' is not a valid Strapi data file.`
@@ -90,16 +152,21 @@ class LocalFileSourceProvider implements ISourceProvider {
   }
 
   async #loadMetadata() {
-    const backupStream = this.#getBackupStream();
+    const backupStream = await this.#getBackupStream();
     this.#metadata = await this.#parseJSONFile<IMetadata>(backupStream, METADATA_FILE_PATH);
   }
 
-  async #loadAssetMetadata(path: string) {
-    const backupStream = this.#getBackupStream();
-    return this.#parseJSONFile<IFile>(backupStream, path);
+  async #loadAssetMetadata(sidecarPath: string) {
+    const backupStream = await this.#getBackupStream();
+    const filename = path.posix.basename(sidecarPath).replace(/\.json$/, '');
+    return validateAssetMetadata(
+      await this.#parseJSONFile<IFile>(backupStream, sidecarPath),
+      filename
+    );
   }
 
   async getMetadata() {
+    this.#reportInfo('getting metadata');
     if (!this.#metadata) {
       await this.#loadMetadata();
     }
@@ -108,90 +175,227 @@ class LocalFileSourceProvider implements ISourceProvider {
   }
 
   async getSchemas() {
-    const schemas = await collect<Schema.Schema>(this.createSchemasReadStream());
+    this.#reportInfo('getting schemas');
+    const schemaCollection = await utils.stream.collect<Struct.Schema>(
+      this.createSchemasReadStream()
+    );
 
-    if (isEmpty(schemas)) {
+    if (isEmpty(schemaCollection)) {
       throw new ProviderInitializationError('Could not load schemas from Strapi data file.');
     }
 
-    return keyBy('uid', schemas);
+    // Group schema by UID
+    const schemas = keyBy(schemaCollection, 'uid');
+
+    // Transform to valid JSON
+    return utils.schema.schemasToValidJSON(schemas);
+  }
+
+  async validateStage(stage: TransferStage) {
+    if (stage !== 'assets') {
+      return;
+    }
+
+    const uploads = new Set<string>();
+    const sidecars = new Map<string, Buffer>();
+    const inStream = await this.#getBackupStream();
+
+    await new Promise<void>((resolve, reject) => {
+      let activeEntries = 0;
+      let archiveFinished = false;
+      let validationError: Error | undefined;
+
+      const finishWhenIdle = () => {
+        if (!archiveFinished || activeEntries > 0) {
+          return;
+        }
+        if (validationError) {
+          reject(validationError);
+          return;
+        }
+        resolve();
+      };
+
+      pipeline(
+        [
+          inStream,
+          new Parser({
+            filter(filePath: string, entry: Stats | ReadEntry) {
+              if (!('type' in entry) || entry.type !== 'File') {
+                return false;
+              }
+              return (
+                isFilePathInDirname('assets/uploads', filePath) ||
+                isFilePathInDirname('assets/metadata', filePath)
+              );
+            },
+            async onReadEntry(entry: ReadEntry) {
+              activeEntries += 1;
+              const normalizedPath = unknownPathToPosix(entry.path);
+              const filename = path.basename(normalizedPath);
+
+              try {
+                if (isFilePathInDirname('assets/uploads', normalizedPath)) {
+                  uploads.add(filename);
+                  entry.resume();
+                  await finished(entry as unknown as Readable);
+                } else {
+                  const chunks: Buffer[] = [];
+                  for await (const chunk of entry) {
+                    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                  }
+                  if (filename.endsWith('.json')) {
+                    const assetFilename = filename.slice(0, -'.json'.length);
+                    sidecars.set(assetFilename, Buffer.concat(chunks));
+                  }
+                }
+              } catch (error) {
+                const reason = errorMessageFromUnknown(error);
+                validationError = new ProviderValidationError(
+                  `Asset metadata preflight failed for "${filename}": ${reason}`,
+                  { error }
+                );
+              } finally {
+                activeEntries -= 1;
+                finishWhenIdle();
+              }
+            },
+          }),
+        ],
+        (error) => {
+          archiveFinished = true;
+          validationError ||= error ?? undefined;
+          finishWhenIdle();
+        }
+      );
+    });
+
+    const missingSidecars = [...uploads].filter((filename) => !sidecars.has(filename)).sort();
+    if (missingSidecars.length > 0) {
+      throw new ProviderValidationError(
+        `Asset metadata preflight failed: missing sidecar metadata for ${missingSidecars
+          .map((filename) => `"${filename}"`)
+          .join(', ')}. The destination was not modified; re-export and try again.`
+      );
+    }
+
+    const metadata = new Map<string, IFile>();
+    for (const filename of uploads) {
+      try {
+        metadata.set(
+          filename,
+          validateAssetMetadata(JSON.parse(sidecars.get(filename)!.toString()), filename)
+        );
+      } catch (error) {
+        const reason = errorMessageFromUnknown(error);
+        throw new ProviderValidationError(
+          `Asset metadata preflight failed for "${filename}.json": ${reason}. The destination was not modified; re-export and try again.`,
+          { error }
+        );
+      }
+    }
+
+    this.#assetMetadata = metadata;
   }
 
   createEntitiesReadStream(): Readable {
+    this.#reportInfo('creating entities read stream');
     return this.#streamJsonlDirectory('entities');
   }
 
   createSchemasReadStream(): Readable {
+    this.#reportInfo('creating schemas read stream');
     return this.#streamJsonlDirectory('schemas');
   }
 
   createLinksReadStream(): Readable {
+    this.#reportInfo('creating links read stream');
     return this.#streamJsonlDirectory('links');
   }
 
   createConfigurationReadStream(): Readable {
+    this.#reportInfo('creating configuration read stream');
     // NOTE: TBD
     return this.#streamJsonlDirectory('configuration');
   }
 
-  createAssetsReadStream(): Readable | Promise<Readable> {
-    const inStream = this.#getBackupStream();
+  createAssetsReadStream(): Readable {
     const outStream = new PassThrough({ objectMode: true });
+    this.#reportInfo('creating assets read stream');
+    this.#pipeAssets(outStream).catch((error: unknown) => {
+      if (!outStream.destroyed) {
+        outStream.destroy(errorFromUnknown(error));
+      }
+    });
+    return outStream;
+  }
+
+  async #pipeAssets(outStream: PassThrough): Promise<void> {
+    const inStream = await this.#getBackupStream();
     const loadAssetMetadata = this.#loadAssetMetadata.bind(this);
+    const assetMetadata = this.#assetMetadata;
+
+    let activeAsyncEntries = 0;
+    const runReadEntry = async (fn: () => Promise<void>) => {
+      activeAsyncEntries += 1;
+      try {
+        await fn();
+      } finally {
+        activeAsyncEntries -= 1;
+      }
+    };
 
     pipeline(
       [
         inStream,
-        new tar.Parse({
+        new Parser({
           // find only files in the assets/uploads folder
-          filter(filePath, entry) {
-            if (entry.type !== 'File') {
+          filter(filePath: string, entry: Stats | ReadEntry) {
+            if (!('type' in entry) || entry.type !== 'File') {
               return false;
             }
             return isFilePathInDirname('assets/uploads', filePath);
           },
-          async onentry(entry) {
-            const { path: filePath, size = 0 } = entry;
-            const normalizedPath = unknownPathToPosix(filePath);
-            const file = path.basename(normalizedPath);
-            let metadata;
-            try {
-              metadata = await loadAssetMetadata(`assets/metadata/${file}.json`);
-            } catch (error) {
-              console.warn(
-                ` Failed to read metadata for ${file}, Strapi will try to fix this issue automatically`
-              );
-            }
-            const asset: IAsset = {
-              metadata,
-              filename: file,
-              filepath: normalizedPath,
-              stats: { size },
-              stream: entry as unknown as Readable,
-            };
-            outStream.write(asset);
+          async onReadEntry(entry: ReadEntry) {
+            await runReadEntry(async () => {
+              const { path: filePath, size = 0 } = entry;
+              const normalizedPath = unknownPathToPosix(filePath);
+              const file = path.basename(normalizedPath);
+              const metadata =
+                assetMetadata?.get(file) ??
+                (await loadAssetMetadata(`assets/metadata/${file}.json`).catch(() => {
+                  throw new Error(`Failed to read metadata for ${file}`);
+                }));
+              const asset: IAsset = {
+                metadata,
+                filename: file,
+                filepath: normalizedPath,
+                stats: { size },
+                stream: entry as unknown as Readable,
+              };
+              await write(outStream, asset);
+            });
           },
         }),
       ],
-      () => outStream.end()
+      (err) => this.#endPassThroughWhenTarIdle(outStream, () => activeAsyncEntries, err)
     );
-
-    return outStream;
   }
 
-  #getBackupStream() {
+  async #getBackupStream() {
+    const { chain } = await loadStreamDeps();
     const { file, encryption, compression } = this.options;
 
     const streams: StreamItemArray = [];
 
     try {
       streams.push(fs.createReadStream(file.path));
-    } catch (e) {
+    } catch {
       throw new Error(`Could not read backup file path provided at "${this.options.file.path}"`);
     }
 
     if (encryption.enabled && encryption.key) {
-      streams.push(createDecryptionCipher(encryption.key));
+      streams.push(utils.encryption.createDecryptionCipher(encryption.key));
     }
 
     if (compression.enabled) {
@@ -202,64 +406,76 @@ class LocalFileSourceProvider implements ISourceProvider {
   }
 
   // `directory` must be posix formatted path
-  #streamJsonlDirectory(directory: string) {
-    const inStream = this.#getBackupStream();
-
+  #streamJsonlDirectory(directory: string): Readable {
     const outStream = new PassThrough({ objectMode: true });
+    this.#pipeJsonlDirectory(outStream, directory).catch((error: unknown) => {
+      if (!outStream.destroyed) {
+        outStream.destroy(errorFromUnknown(error));
+      }
+    });
+    return outStream;
+  }
+
+  async #pipeJsonlDirectory(outStream: PassThrough, directory: string): Promise<void> {
+    const { chain, parser } = await loadStreamDeps();
+    const inStream = await this.#getBackupStream();
+
+    let activeAsyncEntries = 0;
+    const runReadEntry = async (fn: () => Promise<void>) => {
+      activeAsyncEntries += 1;
+      try {
+        await fn();
+      } finally {
+        activeAsyncEntries -= 1;
+      }
+    };
 
     pipeline(
       [
         inStream,
-        new tar.Parse({
-          filter(filePath, entry) {
-            if (entry.type !== 'File') {
+        new Parser({
+          filter(filePath: string, entry: Stats | ReadEntry) {
+            if (!('type' in entry) || entry.type !== 'File') {
               return false;
             }
 
             return isFilePathInDirname(directory, filePath);
           },
 
-          async onentry(entry) {
-            const transforms = [
-              // JSONL parser to read the data chunks one by one (line by line)
-              parser({
-                checkErrors: true,
-              }),
-              // The JSONL parser returns each line as key/value
-              (line: { key: string; value: object }) => line.value,
-            ];
+          async onReadEntry(entry: ReadEntry) {
+            await runReadEntry(async () => {
+              const transforms = [
+                // JSONL parser to read the data chunks one by one (line by line)
+                parser(),
+                // The JSONL parser returns each line as key/value
+                (line: { key: string; value: object }) => line.value,
+              ];
 
-            const stream = entry.pipe(chain(transforms));
+              const stream = chain(transforms);
+              entry.pipe(stream);
 
-            try {
-              for await (const chunk of stream) {
-                outStream.write(chunk);
+              try {
+                for await (const chunk of stream) {
+                  await write(outStream, chunk);
+                }
+              } catch (e: unknown) {
+                outStream.destroy(
+                  new ProviderTransferError(
+                    `Error parsing backup files from backup file ${entry.path}: ${errorMessageFromUnknown(e)}`,
+                    {
+                      details: {
+                        error: e,
+                      },
+                    }
+                  )
+                );
               }
-            } catch (e: unknown) {
-              outStream.destroy(
-                new ProviderTransferError(
-                  `Error parsing backup files from backup file ${entry.path}: ${
-                    (e as Error).message
-                  }`,
-                  {
-                    details: {
-                      error: e,
-                    },
-                  }
-                )
-              );
-            }
+            });
           },
         }),
       ],
-      async () => {
-        // Manually send the 'end' event to the out stream
-        // once every entry has finished streaming its content
-        outStream.end();
-      }
+      (err) => this.#endPassThroughWhenTarIdle(outStream, () => activeAsyncEntries, err)
     );
-
-    return outStream;
   }
 
   // For collecting an entire JSON file then parsing it, not for streaming JSONL
@@ -269,25 +485,28 @@ class LocalFileSourceProvider implements ISourceProvider {
         [
           fileStream,
           // Custom backup archive parsing
-          new tar.Parse({
+          new Parser({
             /**
              * Filter the parsed entries to only keep the one that matches the given filepath
              */
-            filter(entryPath, entry) {
-              if (entry.type !== 'File') {
+            filter(entryPath: string, entry: Stats | ReadEntry) {
+              if (!('type' in entry) || entry.type !== 'File') {
                 return false;
               }
 
               return isPathEquivalent(entryPath, filePath);
             },
 
-            async onentry(entry) {
-              // Collect all the content of the entry file
-              const content = await entry.collect();
+            async onReadEntry(entry: ReadEntry) {
+              // Collect all the content of the entry stream (ReadEntry has no .collect() in tar v7)
+              const chunks: Buffer[] = [];
+              for await (const chunk of entry) {
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+              }
 
               try {
                 // Parse from buffer array to string to JSON
-                const parsedContent = JSON.parse(Buffer.concat(content).toString());
+                const parsedContent = JSON.parse(Buffer.concat(chunks).toString());
 
                 // Resolve the Promise with the parsed content
                 resolve(parsedContent);

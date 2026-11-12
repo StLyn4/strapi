@@ -1,24 +1,39 @@
-import { pick, uniq, prop, getOr, flatten, pipe, map } from 'lodash/fp';
+import { get, property, flow, pick, uniq, flatten } from 'lodash';
 import { contentTypes as contentTypesUtils, errors } from '@strapi/utils';
-import type { Common } from '@strapi/types';
+import type { Core, Data, UID } from '@strapi/types';
+import type { FillFromLocale } from '../../../shared/contracts/content-manager';
 import { getService } from '../utils';
-import { validateGetNonLocalizedAttributesInput } from '../validation/content-types';
+import {
+  validateGetNonLocalizedAttributesInput,
+  validateFillFromLocaleInput,
+} from '../validation/content-types';
 
 const { ApplicationError } = errors;
 
 const { PUBLISHED_AT_ATTRIBUTE } = contentTypesUtils.constants;
 
-const getLocalesProperty = getOr<string[]>([], 'properties.locales');
-const getFieldsProperty = prop('properties.fields');
+const getLocalesProperty = (permission: { properties?: { locales?: string[] } }): string[] =>
+  get(permission, 'properties.locales', []);
+const getFieldsProperty = property('properties.fields');
 
-const getFirstLevelPath = map((path: string) => path.split('.')[0]);
+const getFirstLevelPath = (paths: string[]) => paths.map((path) => path.split('.')[0]);
 
 const controller = {
   async getNonLocalizedAttributes(ctx) {
-    const { user } = ctx.state;
-    const { model, id, locale } = ctx.request.body;
+    const { user, userAbility } = ctx.state;
+    const body = ctx.request.body as any;
+    const { model, id, locale } = body;
 
     await validateGetNonLocalizedAttributesInput({ model, id, locale });
+
+    const permissionChecker = strapi
+      .plugin('content-manager')
+      .service('permission-checker')
+      .create({ userAbility, model });
+
+    if (permissionChecker.cannot.read()) {
+      return ctx.forbidden();
+    }
 
     const {
       copyNonLocalizedAttributes,
@@ -28,20 +43,20 @@ const controller = {
 
     const {
       default: { READ_ACTION, CREATE_ACTION },
-    } = strapi.admin.services.constants;
+    } = strapi.service('admin::constants');
 
     const modelDef = strapi.contentType(model);
     const attributesToPopulate = getNestedPopulateOfNonLocalizedAttributes(model);
 
     if (!isLocalizedContentType(modelDef)) {
-      throw new ApplicationError('model.not.localized');
+      throw new ApplicationError(`Model ${model} is not localized`);
     }
 
     const params = modelDef.kind === 'singleType' ? {} : { id };
 
-    const entity = await strapi
+    const entity = await strapi.db
       .query(model)
-      .findOne({ where: params, populate: [...attributesToPopulate, 'localizations'] });
+      .findOne({ where: params, populate: attributesToPopulate });
 
     if (!entity) {
       return ctx.notFound();
@@ -52,7 +67,7 @@ const controller = {
         action: [READ_ACTION, CREATE_ACTION],
         subject: model,
         role: {
-          id: user.roles.map(prop('id')),
+          id: user.roles.map((role: Pick<Data.Entity, 'id'>) => role?.id),
         },
       },
     });
@@ -61,18 +76,85 @@ const controller = {
       .filter((perm: any) => getLocalesProperty(perm).includes(locale))
       .map(getFieldsProperty);
 
-    const permittedFields = pipe(flatten, getFirstLevelPath, uniq)(localePermissions);
+    const permittedFields = flow(flatten, getFirstLevelPath, uniq)(localePermissions);
 
     const nonLocalizedFields = copyNonLocalizedAttributes(modelDef, entity);
-    const sanitizedNonLocalizedFields = pick(permittedFields, nonLocalizedFields);
+    const pickedFields = pick(nonLocalizedFields, permittedFields);
+
+    // Guard relations: omit fields that point to content types the user cannot read
+    const sanitizedNonLocalizedFields = Object.fromEntries(
+      Object.entries(pickedFields).filter(([key]) => {
+        const attribute = modelDef.attributes?.[key] as any;
+        if (attribute?.type === 'relation' && attribute.target) {
+          return userAbility.can(READ_ACTION, attribute.target);
+        }
+        return true;
+      })
+    );
+
+    const availableLocalesResult = await strapi.plugins['content-manager']
+      .service('document-metadata')
+      .getMetadata(model, entity, {
+        availableLocales: true,
+      });
+
+    const availableLocales = availableLocalesResult.availableLocales.map((localeResult: any) =>
+      pick(localeResult, ['id', 'locale', PUBLISHED_AT_ATTRIBUTE])
+    );
 
     ctx.body = {
       nonLocalizedFields: sanitizedNonLocalizedFields,
-      localizations: entity.localizations.concat(
-        pick(['id', 'locale', PUBLISHED_AT_ATTRIBUTE], entity)
+      localizations: availableLocales.concat(
+        pick(entity, ['id', 'locale', PUBLISHED_AT_ATTRIBUTE])
       ),
     };
   },
-} satisfies Common.Controller;
+
+  async getFillFromLocaleData(ctx) {
+    const { userAbility } = ctx.state;
+    const { model } = ctx.params;
+
+    await validateFillFromLocaleInput(ctx.query);
+
+    const { documentId, sourceLocale, targetLocale } = ctx.query as unknown as Omit<
+      FillFromLocale.Params,
+      'model'
+    >;
+
+    const permissionChecker = strapi
+      .plugin('content-manager')
+      .service('permission-checker')
+      .create({ userAbility, model });
+
+    if (permissionChecker.cannot.read()) {
+      return ctx.forbidden();
+    }
+
+    const fillFromLocaleService = getService('fill-from-locale');
+
+    const rawDocument = await fillFromLocaleService.fetchRawDocument(
+      model as UID.ContentType,
+      sourceLocale,
+      documentId
+    );
+
+    if (!rawDocument) {
+      return ctx.notFound();
+    }
+
+    // Field-level filtering: strip fields the user cannot read on this content type
+    const sanitizedDocument = await permissionChecker.sanitizeOutput(rawDocument);
+
+    // Transform relations to target locale, skipping those the user cannot read
+    const data = await fillFromLocaleService.transformDocument(
+      sanitizedDocument as Record<string, unknown>,
+      model as UID.ContentType,
+      targetLocale,
+      userAbility
+    );
+
+    ctx.body = { data };
+  },
+} satisfies Core.Controller;
 
 export default controller;

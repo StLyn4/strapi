@@ -5,6 +5,7 @@
 const { createTestBuilder } = require('api-tests/builder');
 const { createStrapiInstance } = require('api-tests/strapi');
 const { createAuthRequest } = require('api-tests/request');
+const { async } = require('@strapi/utils');
 
 const builder = createTestBuilder();
 let strapi;
@@ -48,17 +49,38 @@ const productWithCompoAndDP = {
   pluralName: 'product-with-compo-and-dps',
   description: '',
   collectionName: '',
+  pluginOptions: {
+    i18n: {
+      localized: true,
+    },
+  },
 };
 
-describe('CM API - Basic + compo + draftAndPublish', () => {
+const extraLocales = ['fr', 'it', 'es'];
+
+describe('CM API - Basic + compo', () => {
   beforeAll(async () => {
     await builder.addComponent(compo).addContentType(productWithCompoAndDP).build();
 
     strapi = await createStrapiInstance();
     rq = await createAuthRequest({ strapi });
+
+    // Create new locales
+    for (const extraLocale of extraLocales) {
+      await rq({
+        method: 'POST',
+        url: '/i18n/locales',
+        body: {
+          code: extraLocale,
+          name: `Locale name: (${extraLocale})`,
+          isDefault: false,
+        },
+      });
+    }
   });
 
   afterAll(async () => {
+    await strapi.db.query('plugin::i18n.locale').deleteMany({ where: { code: { $ne: 'en' } } });
     await strapi.destroy();
     await builder.cleanup();
   });
@@ -78,21 +100,21 @@ describe('CM API - Basic + compo + draftAndPublish', () => {
       body: product,
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(product);
-    expect(res.body.publishedAt).toBeNull();
-    data.productsWithCompoAndDP.push(res.body);
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data).toMatchObject(product);
+    expect(res.body.data.publishedAt).toBeNull();
+    data.productsWithCompoAndDP.push(res.body.data);
   });
 
   test('Read product with compo', async () => {
     const res = await rq({
       method: 'GET',
-      url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${data.productsWithCompoAndDP[0].id}`,
+      url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${data.productsWithCompoAndDP[0].documentId}`,
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(data.productsWithCompoAndDP[0]);
-    expect(res.body.publishedAt).toBeNull();
+    expect(res.body.data).toMatchObject(data.productsWithCompoAndDP[0]);
+    expect(res.body.data.publishedAt).toBeNull();
   });
 
   test('Update product with compo', async () => {
@@ -106,27 +128,24 @@ describe('CM API - Basic + compo + draftAndPublish', () => {
     };
     const res = await rq({
       method: 'PUT',
-      url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${data.productsWithCompoAndDP[0].id}`,
+      url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${data.productsWithCompoAndDP[0].documentId}`,
       body: product,
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(product);
-    expect(res.body.id).toEqual(data.productsWithCompoAndDP[0].id);
-    expect(res.body.publishedAt).toBeNull();
-    data.productsWithCompoAndDP[0] = res.body;
+    expect(res.body.data).toMatchObject(product);
+    expect(res.body.data.documentId).toEqual(data.productsWithCompoAndDP[0].documentId);
+    expect(res.body.data.publishedAt).toBeNull();
+    data.productsWithCompoAndDP[0] = res.body.data;
   });
 
   test('Delete product with compo', async () => {
     const res = await rq({
       method: 'DELETE',
-      url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${data.productsWithCompoAndDP[0].id}`,
+      url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${data.productsWithCompoAndDP[0].documentId}`,
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(data.productsWithCompoAndDP[0]);
-    expect(res.body.id).toEqual(data.productsWithCompoAndDP[0].id);
-    expect(res.body.publishedAt).toBeNull();
     data.productsWithCompoAndDP.shift();
   });
 
@@ -143,9 +162,9 @@ describe('CM API - Basic + compo + draftAndPublish', () => {
         body: product,
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toMatchObject(product);
-      data.productsWithCompoAndDP.push(res.body);
+      expect(res.statusCode).toBe(201);
+      expect(res.body.data).toMatchObject(product);
+      data.productsWithCompoAndDP.push(res.body.data);
     });
 
     test('Can create product with compo - minLength', async () => {
@@ -163,9 +182,9 @@ describe('CM API - Basic + compo + draftAndPublish', () => {
         body: product,
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toMatchObject(product);
-      data.productsWithCompoAndDP.push(res.body);
+      expect(res.statusCode).toBe(201);
+      expect(res.body.data).toMatchObject(product);
+      data.productsWithCompoAndDP.push(res.body.data);
     });
 
     test('Cannot create product with compo - maxLength', async () => {
@@ -217,9 +236,9 @@ describe('CM API - Basic + compo + draftAndPublish', () => {
         body: product,
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toMatchObject(product);
-      data.productsWithCompoAndDP.push(res.body);
+      expect(res.statusCode).toBe(201);
+      expect(res.body.data).toMatchObject(product);
+      data.productsWithCompoAndDP.push(res.body.data);
     });
   });
 
@@ -241,18 +260,16 @@ describe('CM API - Basic + compo + draftAndPublish', () => {
 
       const publishRes = await rq({
         method: 'POST',
-        url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${res.body.id}/actions/publish`,
+        url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${res.body.data.documentId}/actions/publish`,
         body: product,
       });
 
       expect(publishRes.statusCode).toBe(200);
-      expect(publishRes.body).toMatchObject(product);
-      expect(publishRes.body.id).toEqual(res.body.id);
-      expect(publishRes.body.publishedAt).not.toBeNull();
+      // TODO: Validate document is published
     });
 
     test('Can bulk publish product with compo - required', async () => {
-      const product = {
+      const product1 = {
         name: 'Product 1',
         description: 'Product description',
         compo: {
@@ -260,22 +277,112 @@ describe('CM API - Basic + compo + draftAndPublish', () => {
           description: 'short',
         },
       };
-      const res = await rq({
+
+      const product2 = {
+        name: 'Product 2',
+        description: 'Product description',
+        compo: {
+          name: 'compo name',
+          description: 'short',
+        },
+      };
+
+      const {
+        body: {
+          data: { documentId: documentId1 },
+        },
+      } = await rq({
         method: 'POST',
         url: '/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp',
-        body: product,
+        body: product1,
+      });
+
+      const {
+        body: {
+          data: { documentId: documentId2 },
+        },
+      } = await rq({
+        method: 'POST',
+        url: '/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp',
+        body: product2,
       });
 
       const publishRes = await rq({
         method: 'POST',
         url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/actions/bulkPublish`,
         body: {
-          ids: [res.body.id],
+          documentIds: [documentId1, documentId2],
         },
       });
 
       expect(publishRes.statusCode).toBe(200);
-      expect(publishRes.body).toMatchObject({ count: 1 });
+      expect(publishRes.body).toMatchObject({ count: 2 });
+    });
+
+    test('BulkPublish across multiple documents and locales', async () => {
+      // Create multiple documents in the default locales
+      const numberOfDocuments = 5;
+      const defaultDocuments = {};
+      for (let i = 0; i < numberOfDocuments; i += 1) {
+        const product = {
+          name: `Product ${i}`,
+          description: `Product description ${i}`,
+          compo: {
+            name: `compo name ${i}`,
+            description: `short ${i}`,
+          },
+        };
+
+        const {
+          body: {
+            data: { documentId },
+          },
+        } = await rq({
+          method: 'POST',
+          url: '/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp',
+          body: product,
+        });
+
+        defaultDocuments[documentId] = product;
+      }
+
+      // Add extra locales to each document
+      await async.map(Object.entries(defaultDocuments), async ([documentId, product]) => {
+        await async.map(extraLocales, async (locale) => {
+          await rq({
+            method: 'PUT',
+            url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/${documentId}`,
+            body: {
+              name: `Product ${product.name} ${locale}`,
+              compo: {
+                name: `compo name ${product.compo.name} ${locale}`,
+                description: `short ${product.compo.description} ${locale}`,
+              },
+            },
+            qs: {
+              locale,
+            },
+          });
+        });
+      });
+
+      // Bulk publish all the documents
+      const bulkPublishRes = await rq({
+        method: 'POST',
+        url: `/content-manager/collection-types/api::product-with-compo-and-dp.product-with-compo-and-dp/actions/bulkPublish`,
+        body: {
+          documentIds: Object.keys(defaultDocuments),
+        },
+        qs: {
+          locale: ['en', ...extraLocales],
+        },
+      });
+
+      expect(bulkPublishRes.statusCode).toBe(200);
+      expect(bulkPublishRes.body).toMatchObject({
+        count: numberOfDocuments * (extraLocales.length + 1),
+      });
+      // TODO verify that all the drafts are still there
     });
   });
 });

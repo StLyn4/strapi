@@ -1,11 +1,22 @@
-import { Common } from '@strapi/types';
+import type { Core } from '@strapi/types';
 import passport from 'koa-passport';
 import { getService } from '../../utils';
 import utils from './utils';
+import { emitLoginFailure } from '../../../../../server/src/audit-logs/auth';
+import {
+  REFRESH_COOKIE_NAME,
+  buildCookieOptionsWithExpiry,
+  buildSessionMetadataFromContext,
+  getAccessCookieName,
+  getAccessCookiePath,
+  getAccessCookieDomain,
+  getSessionManager,
+  generateDeviceId,
+} from '../../../../../shared/utils/session-auth';
 
 const defaultConnectionError = () => new Error('Invalid connection payload');
 
-export const authenticate: Common.MiddlewareHandler = async (ctx, next) => {
+export const authenticate: Core.MiddlewareHandler = async (ctx, next) => {
   const {
     params: { provider },
   } = ctx;
@@ -18,10 +29,10 @@ export const authenticate: Common.MiddlewareHandler = async (ctx, next) => {
         strapi.log.error(error);
       }
 
-      strapi.eventHub.emit('admin.auth.error', {
-        error: error || defaultConnectionError(),
-        provider,
-      });
+      emitLoginFailure(
+        { strapi },
+        { error: error || defaultConnectionError(), provider, reason: 'sso_connection_error' }
+      );
 
       return ctx.redirect(redirectUrls.error);
     }
@@ -33,15 +44,20 @@ export const authenticate: Common.MiddlewareHandler = async (ctx, next) => {
   })(ctx, next);
 };
 
-const existingUserScenario: Common.MiddlewareHandler =
+const existingUserScenario: Core.MiddlewareHandler =
   (ctx, next) => async (user: any, provider: any) => {
     const redirectUrls = utils.getPrefixedRedirectUrls();
 
     if (!user.isActive) {
-      strapi.eventHub.emit('admin.auth.error', {
-        error: new Error(`Deactivated user tried to login (${user.id})`),
-        provider,
-      });
+      emitLoginFailure(
+        { strapi },
+        {
+          error: new Error(`Deactivated user tried to login (${user.id})`),
+          provider,
+          reason: 'account_inactive',
+          user,
+        }
+      );
       return ctx.redirect(redirectUrls.error);
     }
 
@@ -49,7 +65,7 @@ const existingUserScenario: Common.MiddlewareHandler =
     return next();
   };
 
-const nonExistingUserScenario: Common.MiddlewareHandler =
+const nonExistingUserScenario: Core.MiddlewareHandler =
   (ctx, next) => async (profile: any, provider: any) => {
     const { email, firstname, lastname, username } = profile;
     const redirectUrls = utils.getPrefixedRedirectUrls();
@@ -60,7 +76,10 @@ const nonExistingUserScenario: Common.MiddlewareHandler =
     const isMissingRegisterFields = !username && (!firstname || !lastname);
 
     if (!providers.autoRegister || !providers.defaultRole || isMissingRegisterFields) {
-      strapi.eventHub.emit('admin.auth.error', { error: defaultConnectionError(), provider });
+      emitLoginFailure(
+        { strapi },
+        { error: defaultConnectionError(), provider, reason: 'sso_registration_disabled' }
+      );
       return ctx.redirect(redirectUrls.error);
     }
 
@@ -68,7 +87,10 @@ const nonExistingUserScenario: Common.MiddlewareHandler =
 
     // If the default role has been misconfigured, redirect with an error
     if (!defaultRole) {
-      strapi.eventHub.emit('admin.auth.error', { error: defaultConnectionError(), provider });
+      emitLoginFailure(
+        { strapi },
+        { error: defaultConnectionError(), provider, reason: 'sso_role_misconfigured' }
+      );
       return ctx.redirect(redirectUrls.error);
     }
 
@@ -91,25 +113,76 @@ const nonExistingUserScenario: Common.MiddlewareHandler =
     return next();
   };
 
-export const redirectWithAuth: Common.MiddlewareHandler = (ctx) => {
+export const redirectWithAuth: Core.MiddlewareHandler = async (ctx) => {
   const {
     params: { provider },
   } = ctx;
   const redirectUrls = utils.getPrefixedRedirectUrls();
-  const domain: string | undefined = strapi.config.get('admin.auth.domain');
   const { user } = ctx.state;
 
-  const jwt = getService('token').createJwtToken(user);
+  try {
+    const sessionManager = getSessionManager();
+    if (!sessionManager) {
+      strapi.log.error('SessionManager not available for SSO authentication');
+      return ctx.redirect(redirectUrls.error);
+    }
 
-  const isProduction = strapi.config.get('environment') === 'production';
+    const userId = String(user.id);
+    const deviceId = generateDeviceId();
 
-  const cookiesOptions = { httpOnly: false, secure: isProduction, overwrite: true, domain };
+    const { token: refreshToken, absoluteExpiresAt } = await sessionManager(
+      'admin'
+    ).generateRefreshToken(userId, deviceId, {
+      type: 'refresh',
+      metadata: buildSessionMetadataFromContext(ctx),
+    });
 
-  const sanitizedUser = getService('user').sanitizeUser(user);
-  strapi.eventHub.emit('admin.auth.success', { user: sanitizedUser, provider });
+    const cookieOptions = buildCookieOptionsWithExpiry('refresh', absoluteExpiresAt);
+    ctx.cookies.set(REFRESH_COOKIE_NAME, refreshToken, cookieOptions);
 
-  ctx.cookies.set('jwtToken', jwt, cookiesOptions);
-  ctx.redirect(redirectUrls.success);
+    const accessResult = await sessionManager('admin').generateAccessToken(refreshToken);
+    if ('error' in accessResult) {
+      strapi.log.error('Failed to generate access token for SSO user');
+      return ctx.redirect(redirectUrls.error);
+    }
+
+    const { token: accessToken } = accessResult;
+
+    const configuredSecure = strapi.config.get('admin.auth.cookie.secure');
+    const isProduction = process.env.NODE_ENV === 'production';
+    const isSecure = typeof configuredSecure === 'boolean' ? configuredSecure : isProduction;
+
+    // Resolve through the shared helpers so the server write agrees with the
+    // client set/delete (which read the same config inlined at build time);
+    // any divergence leaves a cookie the admin panel cannot clear on logout.
+    const domain = getAccessCookieDomain();
+    const path = getAccessCookiePath();
+
+    ctx.cookies.set(getAccessCookieName(), accessToken, {
+      httpOnly: false,
+      secure: isSecure,
+      overwrite: true,
+      domain,
+      path,
+    });
+
+    const sanitizedUser = getService('user').sanitizeUser(user);
+    strapi.eventHub.emit('admin.auth.success', { user: sanitizedUser, provider });
+
+    ctx.redirect(redirectUrls.success);
+  } catch (error) {
+    strapi.log.error('SSO authentication failed during token generation', error);
+    emitLoginFailure(
+      { strapi },
+      {
+        error: error instanceof Error ? error : new Error('Unknown SSO error'),
+        provider,
+        reason: 'unexpected_error',
+        user,
+      }
+    );
+    return ctx.redirect(redirectUrls.error);
+  }
 };
 
 export default {

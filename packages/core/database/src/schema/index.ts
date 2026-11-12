@@ -4,34 +4,52 @@ import createSchemaBuilder from './builder';
 import createSchemaDiff from './diff';
 import createSchemaStorage from './storage';
 import { metadataToSchema } from './schema';
+import { createRenameHelpers } from './rename-helpers';
 
+import type { Schema, SchemaDiff } from './types';
+import type { RenameHelpers } from './rename-helpers';
 import type { Database } from '..';
 
 export type * from './types';
+export type { AttributeRenameHandler, AttributeRenames, RenameHelpers } from './rename-helpers';
 
 const debug = createDebug('strapi::database');
 
-export interface SchemaProvider {
+export interface SchemaProvider extends RenameHelpers {
   builder: ReturnType<typeof createSchemaBuilder>;
   schemaDiff: ReturnType<typeof createSchemaDiff>;
   schemaStorage: ReturnType<typeof createSchemaStorage>;
-  sync(): Promise<void>;
-  syncSchema(): Promise<void>;
+  sync(): Promise<SchemaDiff['status']>;
+  syncSchema(): Promise<SchemaDiff['status']>;
   reset(): Promise<void>;
   create(): Promise<void>;
   drop(): Promise<void>;
+  schema: Schema;
 }
 
-/**
- * @type {import('.').default}
- */
+interface State {
+  schema?: Schema;
+}
+
 export const createSchemaProvider = (db: Database): SchemaProvider => {
-  const schema = metadataToSchema(db.metadata);
+  const state: State = {};
 
   return {
+    get schema() {
+      if (!state.schema) {
+        debug('Converting metadata to database schema');
+        state.schema = metadataToSchema(db.metadata);
+      }
+
+      return state.schema;
+    },
     builder: createSchemaBuilder(db),
     schemaDiff: createSchemaDiff(db),
     schemaStorage: createSchemaStorage(db),
+
+    // Guarded, logged runtime helpers for generated rename migrations
+    // (`db.schema.renameColumn(knex, …)` etc.). See rename-helpers.ts.
+    ...createRenameHelpers({ db }),
 
     /**
      * Drops the database schema
@@ -48,7 +66,7 @@ export const createSchemaProvider = (db: Database): SchemaProvider => {
      */
     async create() {
       debug('Created database schema');
-      await this.builder.createSchema(schema);
+      await this.builder.createSchema(this.schema);
     },
 
     /**
@@ -60,48 +78,69 @@ export const createSchemaProvider = (db: Database): SchemaProvider => {
       await this.create();
     },
 
-    async syncSchema() {
+    async syncSchema(): Promise<SchemaDiff['status']> {
       debug('Synchronizing database schema');
 
-      const DBSchema = await db.dialect.schemaInspector.getSchema();
+      const databaseSchema = await db.dialect.schemaInspector.getSchema();
+      const storedSchema = await this.schemaStorage.read();
 
-      const { status, diff } = await this.schemaDiff.diff(DBSchema, schema);
+      /*
+        3way diff - DB schema / previous metadataSchema / new metadataSchema
+
+        - When something doesn't exist in the previous metadataSchema -> It's not tracked by us and should be ignored
+        - If no previous metadataSchema => use new metadataSchema so we start tracking them and ignore everything else
+        - Apply this logic to Tables / Columns / Indexes / FKs ...
+        - Handle errors (indexes or fks on incompatible stuff ...)
+
+      */
+
+      const { status, diff } = await this.schemaDiff.diff({
+        previousSchema: storedSchema?.schema,
+        databaseSchema,
+        userSchema: this.schema,
+      });
 
       if (status === 'CHANGED') {
         await this.builder.updateSchema(diff);
       }
 
-      await this.schemaStorage.add(schema);
+      await this.schemaStorage.add(this.schema);
+
+      return status;
     },
 
     // TODO: support options to migrate softly or forcefully
     // TODO: support option to disable auto migration & run a CLI command instead to avoid doing it at startup
     // TODO: Allow keeping extra indexes / extra tables / extra columns (globally or on a per table basis)
-    async sync() {
-      if (await db.migrations.shouldRun()) {
-        debug('Found migrations to run');
-        await db.migrations.up();
+    async sync(): Promise<SchemaDiff['status']> {
+      return db.runInPhase('schema sync', async () => {
+        if (await db.migrations.shouldRun()) {
+          debug('Found migrations to run');
+          await db.migrations.up();
 
-        return this.syncSchema();
-      }
+          return this.syncSchema();
+        }
 
-      const oldSchema = await this.schemaStorage.read();
+        const oldSchema = await this.schemaStorage.read();
 
-      if (!oldSchema) {
-        debug('Schema not persisted yet');
-        return this.syncSchema();
-      }
+        if (!oldSchema) {
+          debug('Schema not persisted yet');
+          return this.syncSchema();
+        }
 
-      const { hash: oldHash } = oldSchema;
-      const hash = await this.schemaStorage.hashSchema(schema);
+        const { hash: oldHash } = oldSchema;
+        const hash = await this.schemaStorage.hashSchema(this.schema);
 
-      if (oldHash !== hash) {
-        debug('Schema changed');
+        if (oldHash !== hash) {
+          debug('Schema changed');
 
-        return this.syncSchema();
-      }
+          return this.syncSchema();
+        }
 
-      debug('Schema unchanged');
+        debug('Schema unchanged');
+
+        return 'UNCHANGED';
+      });
     },
   };
 };

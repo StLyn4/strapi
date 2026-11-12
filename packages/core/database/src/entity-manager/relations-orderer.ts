@@ -1,5 +1,4 @@
-import { castArray, maxBy } from 'lodash/fp';
-import _ from 'lodash';
+import _, { castArray, maxBy } from 'lodash';
 
 import { InvalidRelationError } from '../errors';
 import type { ID } from '../types';
@@ -8,6 +7,7 @@ interface Link {
   id: ID;
   position?: { before?: ID; after?: ID; start?: true; end?: true };
   order?: number;
+  __component?: string;
 }
 
 interface OrderedLink extends Link {
@@ -43,26 +43,47 @@ const sortConnectArray = (connectArr: Link[], initialArr: Link[] = [], strictSor
     {} as Record<ID, boolean>
   );
   // Map to store the first index where a relation id is connected
-  const mappedRelations = connectArr.reduce((mapper, relation: Link) => {
-    const adjacentRelId = relation.position?.before || relation.position?.after;
+  const mappedRelations = connectArr.reduce(
+    (mapper, relation: Link) => {
+      const adjacentRelId = relation.position?.before || relation.position?.after;
 
-    if (!adjacentRelId || (!relationInInitialArray[adjacentRelId] && !mapper[adjacentRelId])) {
-      needsSorting = true;
-    }
+      if (!adjacentRelId || (!relationInInitialArray[adjacentRelId] && !mapper[adjacentRelId])) {
+        needsSorting = true;
+      }
 
-    // If the relation is already in the array, throw an error
-    if (mapper[relation.id]) {
-      throw new InvalidRelationError(
-        `The relation with id ${relation.id} is already connected. ` +
-          'You cannot connect the same relation twice.'
-      );
-    }
+      /**
+       * We do not allow duplicate relations to be connected, so we need to check for uniqueness with components
+       * Note that the id here includes the uid for polymorphic relations
+       *
+       * So for normal relations, the same id means the same relation
+       * For component relations, it means the unique combo of (id, component name)
+       */
 
-    return {
-      [relation.id]: { ...relation, computed: false },
-      ...mapper,
-    };
-  }, {} as Record<ID, Link & { computed: boolean }>);
+      // Check if there's an existing relation with this id
+      const existingRelation = mapper[relation.id];
+
+      // Check if existing relation has a component or not
+      const hasNoComponent = existingRelation && !('__component' in existingRelation);
+
+      // Check if the existing relation has the same component as the new relation
+      const hasSameComponent =
+        existingRelation && existingRelation.__component === relation.__component;
+
+      // If we have an existing relation that is not unique (no component or same component) we won't accept it
+      if (existingRelation && (hasNoComponent || hasSameComponent)) {
+        throw new InvalidRelationError(
+          `The relation with id ${relation.id} is already connected. ` +
+            'You cannot connect the same relation twice.'
+        );
+      }
+
+      return {
+        [relation.id]: { ...relation, computed: false },
+        ...mapper,
+      };
+    },
+    {} as Record<ID, Link & { computed: boolean }>
+  );
 
   // If we don't need to sort the connect array, we can return it as is
   if (!needsSorting) return connectArr;
@@ -141,6 +162,11 @@ const sortConnectArray = (connectArr: Link[], initialArr: Link[] = [], strictSor
  * - The final step would be to recalculate fractional order values.
  *      [ { id: 2, order: 4 }, { id: 5, order: 3.33 },  { id: 4, order: 3.66 }, { id: 3, order: 10 } ]
  *
+ * `initArr` is not the full relation list. For an ordered connect, `updateRelations` loads only
+ * the rows named as anchors by the payload plus the lowest- and highest-ordered rows, so entries
+ * that are adjacent in `computedRelations` are not adjacent in the stored list. Placement must be
+ * computed from the anchor's own order, never from its neighbours in this array.
+ *
  * @param {Array<*>} initArr - array of relations to initialize the class with
  * @param {string} idColumn - the column name of the id
  * @param {string} orderColumn - the column name of the order
@@ -154,13 +180,16 @@ const relationsOrderer = <TRelation extends Record<string, ID | number | null>>(
   orderColumn: keyof TRelation,
   strict?: boolean
 ) => {
-  const computedRelations: OrderedLink[] = castArray(initArr ?? []).map((r) => ({
-    init: true,
-    id: r[idColumn] as ID,
-    order: Number(r[orderColumn]) || 1,
-  }));
+  const computedRelations: OrderedLink[] = _.sortBy(
+    castArray(initArr ?? []).map((r) => ({
+      init: true,
+      id: r[idColumn] as ID,
+      order: r[orderColumn] !== null && r[orderColumn] !== undefined ? Number(r[orderColumn]) : 1,
+    })),
+    'order'
+  );
 
-  const maxOrder = maxBy('order', computedRelations)?.order || 0;
+  const maxOrder = maxBy(computedRelations, 'order')?.order || 0;
 
   const findRelation = (id: ID) => {
     const idx = computedRelations.findIndex((r) => r.id === id);
@@ -178,24 +207,28 @@ const relationsOrderer = <TRelation extends Record<string, ID | number | null>>(
     let idx;
 
     if (r.position?.before) {
-      const { idx: _idx, relation } = findRelation(r.position.before);
+      const { idx: beforeIdx, relation } = findRelation(r.position.before);
       if (relation.init) {
         r.order = relation.order - 0.5;
       } else {
         r.order = relation.order;
       }
-      idx = _idx;
+      idx = beforeIdx;
     } else if (r.position?.after) {
-      const { idx: _idx, relation } = findRelation(r.position.after);
+      const { idx: afterIdx, relation } = findRelation(r.position.after);
       if (relation.init) {
         r.order = relation.order + 0.5;
       } else {
         r.order = relation.order;
       }
-
-      idx = _idx + 1;
+      idx = afterIdx + 1;
     } else if (r.position?.start) {
-      r.order = 0.5;
+      if (computedRelations.length > 0) {
+        const firstRelation = computedRelations[0];
+        r.order = firstRelation.init ? firstRelation.order - 0.5 : firstRelation.order;
+      } else {
+        r.order = 0.5;
+      }
       idx = 0;
     } else {
       r.order = maxOrder + 0.5;
@@ -219,7 +252,7 @@ const relationsOrderer = <TRelation extends Record<string, ID | number | null>>(
 
         try {
           insertRelation(relation);
-        } catch (err) {
+        } catch {
           throw new Error(
             `There was a problem connecting relation with id ${
               relation.id
@@ -238,15 +271,22 @@ const relationsOrderer = <TRelation extends Record<string, ID | number | null>>(
      * Get a map between the relation id and its order
      */
     getOrderMap() {
-      return _(computedRelations)
-        .groupBy('order')
-        .reduce((acc, relations) => {
-          if (relations[0]?.init) return acc;
-          relations.forEach((relation, idx) => {
-            acc[relation.id] = Math.floor(relation.order) + (idx + 1) / (relations.length + 1);
-          });
-          return acc;
-        }, {} as Record<ID, number>);
+      const map: Record<ID, number> = {};
+      const chunks = _(computedRelations).groupBy('order').value();
+      const sortedKeys = Object.keys(chunks).sort((a, b) => parseFloat(a) - parseFloat(b));
+
+      for (const orderStr of sortedKeys) {
+        const relations = chunks[orderStr];
+        let offset = 1;
+        relations.forEach((relation) => {
+          if (!relation.init) {
+            map[relation.id] = parseFloat(orderStr) + (offset / (relations.length + 1)) * 0.49;
+            offset += 1;
+          }
+        });
+      }
+
+      return map;
     },
   };
 };

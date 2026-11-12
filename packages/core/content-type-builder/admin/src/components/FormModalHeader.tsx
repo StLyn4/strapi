@@ -3,46 +3,44 @@
  * FormModalHeader
  *
  */
-import { Box, Flex, ModalHeader, Typography } from '@strapi/design-system';
-import { Breadcrumbs, Crumb, Link } from '@strapi/design-system/v2';
-import { CustomFieldUID } from '@strapi/helper-plugin';
+import { Box, Flex, Breadcrumbs, Crumb, Link, Modal } from '@strapi/design-system';
 import { ArrowLeft } from '@strapi/icons';
 import upperFirst from 'lodash/upperFirst';
 import { useIntl } from 'react-intl';
 
-import { useDataManager } from '../hooks/useDataManager';
-import { useFormModalNavigation } from '../hooks/useFormModalNavigation';
 import { getTrad } from '../utils';
 
 import { AttributeIcon, IconByType } from './AttributeIcon';
+import { useDataManager } from './DataManager/useDataManager';
+import { useFormModalNavigation } from './FormModalNavigation/useFormModalNavigation';
 
-import type { SchemaType } from '../types';
-import type { UID } from '@strapi/types';
+import type { Internal, Struct } from '@strapi/types';
 
 interface Header {
   label: string;
   info?: { category: string; name: string };
 }
 
-interface FormModalHeaderProps {
+type BaseProps = {
   actionType?: string | null;
   attributeName: string;
   attributeType: IconByType;
-  categoryName: string;
   contentTypeKind: IconByType;
   dynamicZoneTarget: string;
-  forTarget: SchemaType;
   modalType: string | null;
-  targetUid: UID.Any;
-  customFieldUid?: CustomFieldUID | null;
+  customFieldUid?: string | null;
   showBackLink?: boolean;
-}
+};
+
+type FormModalHeaderProps = BaseProps & {
+  forTarget: Struct.ModelType;
+  targetUid: Internal.UID.Schema;
+};
 
 export const FormModalHeader = ({
   actionType = null,
   attributeName,
   attributeType,
-  categoryName,
   contentTypeKind,
   dynamicZoneTarget,
   forTarget,
@@ -52,20 +50,24 @@ export const FormModalHeader = ({
   showBackLink = false,
 }: FormModalHeaderProps) => {
   const { formatMessage } = useIntl();
-  const { modifiedData } = useDataManager();
+  const { components, contentTypes } = useDataManager();
   const { onOpenModalAddField } = useFormModalNavigation();
 
   let icon: IconByType = 'component';
   let headers: Header[] = [];
 
-  const schema = modifiedData?.[forTarget]?.[targetUid] || modifiedData?.[forTarget] || null;
-  const displayName = schema?.schema.displayName;
+  const type =
+    forTarget === 'component'
+      ? components[targetUid as Internal.UID.Component]
+      : contentTypes[targetUid as Internal.UID.ContentType];
+
+  const displayName = type?.info.displayName;
 
   if (modalType === 'contentType') {
     icon = contentTypeKind;
   }
 
-  if (['component', 'editCategory'].includes(modalType || '')) {
+  if (['component'].includes(modalType || '')) {
     icon = 'component';
   }
 
@@ -83,30 +85,31 @@ export const FormModalHeader = ({
     }
 
     return (
-      <ModalHeader>
+      <Modal.Header>
         <Flex>
           <Box>
             <AttributeIcon type={icon} />
           </Box>
           <Box paddingLeft={3}>
-            <Typography fontWeight="bold" textColor="neutral800" as="h2" id="title">
-              {formatMessage({ id: headerId }, { name: displayName })}
-            </Typography>
+            <Modal.Title>{formatMessage({ id: headerId }, { name: displayName })}</Modal.Title>
           </Box>
         </Flex>
-      </ModalHeader>
+      </Modal.Header>
     );
   }
 
   headers = [
     {
       label: displayName,
-      info: { category: schema?.category || null, name: schema?.schema.displayName },
+      info: {
+        category: ('category' in type && type?.category) || '',
+        name: type?.info?.displayName,
+      },
     },
   ];
 
   if (modalType === 'chooseAttribute') {
-    icon = ['component', 'components'].includes(forTarget) ? 'component' : schema.schema.kind;
+    icon = forTarget === 'component' ? 'component' : 'kind' in type ? type.kind : '';
   }
 
   if (modalType === 'addComponentToDynamicZone') {
@@ -119,17 +122,8 @@ export const FormModalHeader = ({
     headers.push({ label: attributeName });
   }
 
-  if (modalType === 'editCategory') {
-    const label = formatMessage({
-      id: getTrad('modalForm.header.categories'),
-      defaultMessage: 'Categories',
-    });
-
-    headers = [{ label }, { label: categoryName }];
-  }
-
   return (
-    <ModalHeader>
+    <Modal.Header>
       <Flex gap={3}>
         {showBackLink && (
           // This is a workaround and should use the LinkButton with a variant that currently doesn't exist
@@ -168,6 +162,6 @@ export const FormModalHeader = ({
           })}
         </Breadcrumbs>
       </Flex>
-    </ModalHeader>
+    </Modal.Header>
   );
 };

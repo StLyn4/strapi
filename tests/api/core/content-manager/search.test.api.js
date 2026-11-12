@@ -1,7 +1,7 @@
 'use strict';
 
 // Test an API with all the possible filed types and simple filterings (no deep filtering, no relations)
-const { omit } = require('lodash/fp');
+const { omit } = require('lodash');
 const { createTestBuilder } = require('api-tests/builder');
 const { createStrapiInstance } = require('api-tests/strapi');
 const { createAuthRequest } = require('api-tests/request');
@@ -20,6 +20,7 @@ const bedModel = {
   singularName: 'bed',
   pluralName: 'beds',
   kind: 'collectionType',
+  draftAndPublish: true,
   options: {
     noStageAttribute: true,
   },
@@ -60,6 +61,7 @@ const bedModel = {
 
 const bedFixtures = [
   {
+    documentId: 'fixture-a',
     name: 'Sleepy Bed',
     weight: 12.4,
     shortDescription: 'Is a good bed to sleep in.',
@@ -70,8 +72,10 @@ const bedFixtures = [
     serialNumber: '9999999999999999',
     peopleNumber: 6,
     fabricThickness: 1.14157,
+    publishedAt: null,
   },
   {
+    documentId: 'fixture-b',
     name: 'Tired Bed',
     weight: 11.1,
     shortDescription: 'You will never wake up again.',
@@ -82,8 +86,10 @@ const bedFixtures = [
     serialNumber: 1111111111111111,
     peopleNumber: 1,
     fabricThickness: 1.0001,
+    publishedAt: null,
   },
   {
+    documentId: 'fixture-c',
     name: 'Zombie Bed',
     weight: null,
     shortDescription: null,
@@ -94,8 +100,10 @@ const bedFixtures = [
     serialNumber: null,
     peopleNumber: null,
     fabricThickness: null,
+    publishedAt: null,
   },
   {
+    documentId: 'fixture-d',
     name: 'a*b_c%d\\e+f',
     weight: null,
     shortDescription: null,
@@ -106,8 +114,10 @@ const bedFixtures = [
     serialNumber: null,
     peopleNumber: null,
     fabricThickness: null,
+    publishedAt: null,
   },
   {
+    documentId: 'fixture-e',
     name: 'Tired Bed',
     weight: null,
     shortDescription: null,
@@ -118,6 +128,7 @@ const bedFixtures = [
     serialNumber: null,
     peopleNumber: 7,
     fabricThickness: null,
+    publishedAt: null,
   },
 ];
 
@@ -137,12 +148,13 @@ describe('Search query', () => {
   });
 
   describe('Without filters', () => {
-    test('search for "id"', async () => {
+    // TODO V5: Search by id
+    test.skip('search for "documentId"', async () => {
       const res = await rq({
         method: 'GET',
         url: '/content-manager/collection-types/api::bed.bed',
         qs: {
-          _q: data.beds[2].id,
+          _q: data.beds[2].documentId,
         },
       });
 
@@ -151,19 +163,22 @@ describe('Search query', () => {
       expect(res.body.results[0]).toMatchObject(data.beds[2]);
     });
 
-    test.each(Object.keys(bedFixtures[0]))('search that target column %p', async (columnName) => {
-      const res = await rq({
-        method: 'GET',
-        url: '/content-manager/collection-types/api::bed.bed',
-        qs: {
-          _q: bedFixtures[0][columnName],
-        },
-      });
+    test.each(Object.keys(omit(bedFixtures[0], ['publishedAt', 'documentId'])))(
+      'search that target column %p',
+      async (columnName) => {
+        const res = await rq({
+          method: 'GET',
+          url: '/content-manager/collection-types/api::bed.bed',
+          qs: {
+            _q: bedFixtures[0][columnName],
+          },
+        });
 
-      expect(Array.isArray(res.body.results)).toBe(true);
-      expect(res.body.results.length).toBe(1);
-      expect(res.body.results[0]).toMatchObject(data.beds[0]);
-    });
+        expect(Array.isArray(res.body.results)).toBe(true);
+        expect(res.body.results.length).toBe(1);
+        expect(res.body.results[0]).toMatchObject(data.beds[0]);
+      }
+    );
 
     test('search with an empty query', async () => {
       const res = await rq({
@@ -176,7 +191,11 @@ describe('Search query', () => {
 
       expect(Array.isArray(res.body.results)).toBe(true);
       expect(res.body.results.length).toBe(data.beds.length);
-      expect(res.body.results.map(omit(CREATOR_FIELDS))).toEqual(expect.arrayContaining(data.beds));
+      expect(
+        res.body.results.map((value) =>
+          omit(value, [...CREATOR_FIELDS, 'locale', 'localizations', 'status'])
+        )
+      ).toEqual(expect.arrayContaining(data.beds));
     });
 
     test('search with special characters', async () => {

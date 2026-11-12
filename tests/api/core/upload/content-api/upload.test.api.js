@@ -2,7 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const get = require('lodash/get');
 
 // Helpers.
 const { createTestBuilder } = require('api-tests/builder');
@@ -22,6 +21,10 @@ const dogModel = {
   attributes: {
     profilePicture: {
       type: 'media',
+    },
+    relatedMedia: {
+      type: 'media',
+      multiple: true,
     },
   },
 };
@@ -58,18 +61,57 @@ const todoComponent = {
   },
 };
 
+const catModel = {
+  displayName: 'Cat',
+  singularName: 'cat',
+  pluralName: 'cats',
+  kind: 'collectionType',
+  draftAndPublish: true,
+  attributes: {
+    name: {
+      type: 'string',
+    },
+    picture: {
+      type: 'media',
+    },
+  },
+};
+
+const birdModel = {
+  displayName: 'Bird',
+  singularName: 'bird',
+  pluralName: 'birds',
+  kind: 'collectionType',
+  draftAndPublish: true,
+  pluginOptions: { i18n: { localized: true } },
+  attributes: {
+    name: {
+      type: 'string',
+      pluginOptions: { i18n: { localized: true } },
+    },
+    picture: {
+      type: 'media',
+      pluginOptions: { i18n: { localized: true } },
+    },
+  },
+};
+
 describe('Upload plugin', () => {
   beforeAll(async () => {
     await builder
       .addContentType(dogModel)
+      .addContentType(catModel)
+      .addContentType(birdModel)
       .addComponent(todoComponent)
       .addContentType(todoListModel)
+      .addFixtures('plugin::i18n.locale', [{ name: 'French', code: 'fr' }])
       .build();
     strapi = await createStrapiInstance();
     rq = createContentAPIRequest({ strapi });
   });
 
   afterAll(async () => {
+    await strapi.db.query('plugin::i18n.locale').deleteMany({ where: { code: { $ne: 'en' } } });
     await strapi.destroy();
     await builder.cleanup();
   });
@@ -84,7 +126,7 @@ describe('Upload plugin', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBe(1);
       expect(res.body[0]).toEqual(
@@ -117,7 +159,7 @@ describe('Upload plugin', () => {
         },
       });
 
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(201);
       expect(Array.isArray(res.body)).toBe(true);
       expect(res.body.length).toBe(1);
       expect(res.body[0]).toEqual(
@@ -165,19 +207,25 @@ describe('Upload plugin', () => {
         ])
       );
     });
+
     test('Get one file', async () => {
-      const dogEntity = await strapi.entityService.create('api::dog.dog', {
-        data: {},
-        files: {
-          profilePicture: {
-            path: path.join(__dirname, '../utils/rec.jpg'),
-            name: 'rec',
-            type: 'jpg',
-            size: 0,
-          },
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/thumbnail_target.png')),
         },
-        populate: 'profilePicture',
       });
+
+      const dogEntity = await strapi.db.query('api::dog.dog').create({
+        data: {
+          profilePicture: res.body[0].id,
+        },
+        populate: {
+          profilePicture: true,
+        },
+      });
+
       const getRes = await rq({
         method: 'GET',
         url: `/upload/files/${dogEntity.profilePicture.id}`,
@@ -190,189 +238,1379 @@ describe('Upload plugin', () => {
           url: expect.any(String),
         })
       );
-      await strapi.entityService.delete('api::dog.dog', dogEntity.id);
-      await strapi.entityService.delete('plugin::upload.file', dogEntity.profilePicture.id);
-    });
-  });
 
-  describe('Create an entity with a file', () => {
-    test('With an image', async () => {
+      await strapi.db.query('api::dog.dog').delete({ where: { id: dogEntity.id } });
+      await strapi.db
+        .query('plugin::upload.file')
+        .delete({ where: { id: dogEntity.profilePicture.id } });
+    });
+
+    test('Get one file by documentId', async () => {
       const res = await rq({
         method: 'POST',
-        url: '/dogs?populate=*',
+        url: '/upload',
         formData: {
-          data: '{}',
-          'files.profilePicture': fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          files: fs.createReadStream(path.join(__dirname, '../utils/thumbnail_target.png')),
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toMatchObject({
-        data: {
-          attributes: {
-            profilePicture: {
-              data: {
-                id: expect.anything(),
-                attributes: {
-                  provider: 'local',
-                },
-              },
-            },
-          },
-          id: expect.anything(),
-        },
-      });
-
-      data.dogs.push(res.body);
-    });
-
-    test('With a pdf', async () => {
-      const res = await rq({
-        method: 'POST',
-        url: '/dogs?populate=*',
-        formData: {
-          data: '{}',
-          'files.profilePicture': fs.createReadStream(path.join(__dirname, '../utils/rec.pdf')),
-        },
-      });
-
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toMatchObject({
-        data: {
-          attributes: {
-            profilePicture: {
-              data: {
-                id: expect.anything(),
-                attributes: {
-                  provider: 'local',
-                },
-              },
-            },
-          },
-          id: expect.anything(),
-        },
-      });
-      data.dogs.push(res.body);
-    });
-    test('File should have related field', async () => {
-      const fileId = get(data, 'dogs[0].data.attributes.profilePicture.data.id');
-
-      expect(fileId).toBeDefined();
+      const { id, documentId } = res.body[0];
 
       const getRes = await rq({
         method: 'GET',
-        url: `/upload/files/${fileId}`,
-        qs: { populate: '*' },
+        url: `/upload/files/${documentId}`,
       });
 
       expect(getRes.statusCode).toBe(200);
       expect(getRes.body).toEqual(
         expect.objectContaining({
-          id: fileId,
-          related: [expect.any(Object)],
+          id,
+          documentId,
+          url: expect.any(String),
         })
       );
+
+      await rq({ method: 'DELETE', url: `/upload/files/${id}` });
+    });
+
+    test('Rejects the top-level `where` query param when api.rest.strictParams is true', async () => {
+      expect(strapi.config.get('api.rest.strictParams')).toBe(true);
+
+      for (const url of ['/upload/files', '/upload/files/page', '/upload/files/1']) {
+        const res = await rq({
+          method: 'GET',
+          url,
+          qs: { where: { name: { $eq: 'does-not-match' } } },
+        });
+
+        expect(res.statusCode).toBe(400);
+      }
+    });
+
+    test('Ignores the top-level `where` query param when api.rest.strictParams is off', async () => {
+      const file = await strapi.db.query('plugin::upload.file').create({
+        data: {
+          name: 'where-ignored.png',
+          hash: 'where_ignored_hash',
+          ext: '.png',
+          mime: 'image/png',
+          size: 1,
+          url: '/uploads/where_ignored_hash.png',
+          provider: 'local',
+        },
+      });
+
+      const previousStrictParams = strapi.config.get('api.rest.strictParams');
+      strapi.config.set('api.rest.strictParams', false);
+
+      try {
+        for (const url of ['/upload/files', '/upload/files/page']) {
+          const res = await rq({
+            method: 'GET',
+            url,
+            qs: {
+              pagination: { pageSize: 100 },
+              where: { name: { $eq: 'does-not-match' } },
+            },
+          });
+
+          expect(res.statusCode).toBe(200);
+          const results = Array.isArray(res.body) ? res.body : res.body.data;
+          expect(results).toEqual(
+            expect.arrayContaining([expect.objectContaining({ id: file.id })])
+          );
+        }
+      } finally {
+        strapi.config.set('api.rest.strictParams', previousStrictParams);
+        await strapi.db.query('plugin::upload.file').delete({ where: { id: file.id } });
+      }
+    });
+
+    test('Get one file with an unknown documentId returns 404', async () => {
+      const getRes = await rq({
+        method: 'GET',
+        url: '/upload/files/unknowndocumentid0000000',
+      });
+
+      expect(getRes.statusCode).toBe(404);
     });
   });
 
-  describe('Create an entity with a component with a file', () => {
-    test('With an image', async () => {
+  describe('Delete', () => {
+    test('Delete a file by id', async () => {
       const res = await rq({
         method: 'POST',
-        url: '/todolists',
+        url: '/upload',
         formData: {
-          data: '{"title":"Test todolist title","todo":[{"task":"First todo"},{"task":"Second todo"}]}',
-          'files.todo.0.docs': fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          files: fs.createReadStream(path.join(__dirname, '../utils/thumbnail_target.png')),
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body).toMatchObject({
-        data: {
-          attributes: {
-            title: 'Test todolist title',
+      const { id } = res.body[0];
+
+      const deleteRes = await rq({ method: 'DELETE', url: `/upload/files/${id}` });
+
+      expect(deleteRes.statusCode).toBe(200);
+      expect(deleteRes.body).toEqual(expect.objectContaining({ id }));
+
+      const getRes = await rq({ method: 'GET', url: `/upload/files/${id}` });
+
+      expect(getRes.statusCode).toBe(404);
+    });
+
+    test('Delete a file by documentId', async () => {
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/thumbnail_target.png')),
+        },
+      });
+
+      const { id, documentId } = res.body[0];
+
+      const deleteRes = await rq({ method: 'DELETE', url: `/upload/files/${documentId}` });
+
+      expect(deleteRes.statusCode).toBe(200);
+      expect(deleteRes.body).toEqual(expect.objectContaining({ id, documentId }));
+
+      const getRes = await rq({ method: 'GET', url: `/upload/files/${documentId}` });
+
+      expect(getRes.statusCode).toBe(404);
+
+      const dbFile = await strapi.db.query('plugin::upload.file').findOne({ where: { id } });
+
+      expect(dbFile).toBeNull();
+    });
+
+    test('Delete a file with an unknown documentId returns 404', async () => {
+      const deleteRes = await rq({
+        method: 'DELETE',
+        url: '/upload/files/unknowndocumentid0000000',
+      });
+
+      expect(deleteRes.statusCode).toBe(404);
+    });
+  });
+
+  describe('Update', () => {
+    test('Update file info by documentId', async () => {
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/thumbnail_target.png')),
+        },
+      });
+
+      const { id, documentId } = res.body[0];
+
+      const updateRes = await rq({
+        method: 'POST',
+        url: `/upload?id=${documentId}`,
+        formData: {
+          fileInfo: JSON.stringify({ alternativeText: 'updated by documentId' }),
+        },
+      });
+
+      expect(updateRes.statusCode).toBe(200);
+      expect(updateRes.body).toEqual(
+        expect.objectContaining({ id, documentId, alternativeText: 'updated by documentId' })
+      );
+
+      await rq({ method: 'DELETE', url: `/upload/files/${id}` });
+    });
+
+    test('Replace a file by documentId', async () => {
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/thumbnail_target.png')),
+        },
+      });
+
+      const { id, documentId } = res.body[0];
+
+      const replaceRes = await rq({
+        method: 'POST',
+        url: `/upload?id=${documentId}`,
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+        },
+      });
+
+      expect(replaceRes.statusCode).toBe(200);
+      expect(replaceRes.body).toEqual(
+        expect.objectContaining({ id, documentId, mime: 'image/jpeg' })
+      );
+
+      await rq({ method: 'DELETE', url: `/upload/files/${id}` });
+    });
+
+    test('Update file info with an unknown documentId returns 404', async () => {
+      const updateRes = await rq({
+        method: 'POST',
+        url: '/upload?id=unknowndocumentid0000000',
+        formData: {
+          fileInfo: JSON.stringify({ alternativeText: 'nope' }),
+        },
+      });
+
+      expect(updateRes.statusCode).toBe(404);
+    });
+
+    test('Replace a file with an unknown documentId returns 404', async () => {
+      const replaceRes = await rq({
+        method: 'POST',
+        url: '/upload?id=unknowndocumentid0000000',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+        },
+      });
+
+      expect(replaceRes.statusCode).toBe(404);
+    });
+  });
+
+  describe('Filtering data based on media attributes', () => {
+    let uploadRes;
+    let dogRes;
+
+    beforeAll(async () => {
+      await Promise.all(
+        data.dogs.map((dog) => {
+          return strapi.entityService.delete('api::dog.dog', dog.data.id);
+        })
+      );
+
+      uploadRes = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          fileInfo: JSON.stringify({
+            alternativeText: 'rec',
+            caption: 'my caption',
+          }),
+        },
+      });
+
+      dogRes = await rq({
+        method: 'POST',
+        url: '/dogs',
+        body: {
+          data: {
+            profilePicture: {
+              id: uploadRes.body[0].id,
+            },
           },
-          id: expect.anything(),
         },
       });
-      const newlyCreatedTodolist = await rq({
+    });
+
+    afterAll(async () => {
+      await rq({
+        method: 'DELETE',
+        url: `/dogs/${dogRes.body.data.id}`,
+      });
+
+      await rq({
+        method: 'DELETE',
+        url: `/upload/files/${uploadRes.body[0].id}`,
+      });
+    });
+
+    test('can filter on notNull', async () => {
+      let res;
+
+      res = await rq({
         method: 'GET',
-        url: `/todolists/${res.body.data.id}`,
+        url: '/dogs',
         qs: {
-          populate: ['todo', 'todo.docs'],
+          filters: {
+            profilePicture: { $notNull: true },
+          },
         },
       });
 
-      expect(newlyCreatedTodolist.body).toBeDefined();
-      expect(newlyCreatedTodolist.body).toMatchObject({
-        data: {
-          attributes: {
-            title: 'Test todolist title',
-            todo: [
-              {
-                id: expect.anything(),
-                task: 'First todo',
-                docs: {
-                  data: [
-                    {
-                      id: expect.anything(),
-                      attributes: {
-                        mime: 'image/jpeg',
-                        name: 'rec.jpg',
-                      },
-                    },
-                  ],
-                },
+      expect(res.body.data.length).toBe(1);
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: { $notNull: false },
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(0);
+    });
+
+    test('can filter on null', async () => {
+      let res;
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: { $null: true },
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(0);
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: { $null: false },
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(1);
+    });
+
+    test('can filter on id', async () => {
+      let res;
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: uploadRes.body[0].id,
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(1);
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: 999999999,
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(0);
+    });
+
+    test('can filter media attribute', async () => {
+      let res;
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: { ext: '.jpg' },
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(1);
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: { ext: '.pdf' },
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(0);
+    });
+
+    test('can filter media attribute with operators', async () => {
+      let res;
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: {
+              caption: {
+                $contains: 'my',
               },
-              expect.any(Object),
+            },
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(1);
+
+      res = await rq({
+        method: 'GET',
+        url: '/dogs',
+        qs: {
+          filters: {
+            profilePicture: {
+              caption: {
+                $contains: 'not',
+              },
+            },
+          },
+        },
+      });
+
+      expect(res.body.data.length).toBe(0);
+    });
+
+    describe('Media relations', () => {
+      test('connect works', async () => {
+        // upload images
+        const images = await rq({
+          method: 'POST',
+          url: '/upload',
+          formData: {
+            files: [
+              fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+              fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
             ],
           },
-        },
+        });
+        const imageIds = images.body.map((item) => item.id);
+
+        // create entity with just the first image
+        const res = await rq({
+          method: 'POST',
+          url: `/dogs/?populate=*`,
+          body: {
+            data: {
+              relatedMedia: [imageIds[0]],
+            },
+          },
+        });
+
+        const documentId = res.body.data.documentId;
+
+        // connect the second image
+        const connectRes = await rq({
+          method: 'PUT',
+          url: `/dogs/${documentId}?populate=*`,
+          body: JSON.stringify({
+            data: {
+              relatedMedia: {
+                connect: [imageIds[1]],
+              },
+            },
+          }),
+        });
+
+        expect(connectRes.status).toBe(200);
+
+        expect(connectRes.body.data.relatedMedia).toHaveLength(2);
+
+        expect(connectRes.body.data.relatedMedia).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: imageIds[0] }),
+            expect.objectContaining({ id: imageIds[1] }),
+          ])
+        );
+      });
+
+      test('disconnect works', async () => {
+        // upload images
+        const images = await rq({
+          method: 'POST',
+          url: '/upload',
+          formData: {
+            files: [
+              fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+              fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+            ],
+          },
+        });
+        const imageIds = images.body.map((item) => item.id);
+
+        // create entity with both images
+        const res = await rq({
+          method: 'POST',
+          url: `/dogs/?populate=*`,
+          body: {
+            data: {
+              relatedMedia: [imageIds[0], imageIds[1]],
+            },
+          },
+        });
+
+        const documentId = res.body.data.documentId;
+
+        // disconnect the first image
+        const connectRes = await rq({
+          method: 'PUT',
+          url: `/dogs/${documentId}?populate=*`,
+          body: JSON.stringify({
+            data: {
+              relatedMedia: {
+                disconnect: [imageIds[0]],
+              },
+            },
+          }),
+        });
+
+        expect(connectRes.status).toBe(200);
+
+        expect(connectRes.body.data.relatedMedia).toHaveLength(1);
+
+        expect(connectRes.body.data.relatedMedia[0]).toEqual(
+          expect.objectContaining({
+            id: imageIds[1],
+          })
+        );
+      });
+
+      test('set works', async () => {
+        // upload images
+        const images = await rq({
+          method: 'POST',
+          url: '/upload',
+          formData: {
+            files: [
+              fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+              fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+            ],
+          },
+        });
+        const imageIds = images.body.map((item) => item.id);
+
+        // create entity with just the first image
+        const res = await rq({
+          method: 'POST',
+          url: `/dogs/?populate=*`,
+          body: {
+            data: {
+              relatedMedia: [imageIds[0]],
+            },
+          },
+        });
+
+        const documentId = res.body.data.documentId;
+
+        // connect the second image
+        const connectRes = await rq({
+          method: 'PUT',
+          url: `/dogs/${documentId}?populate=*`,
+          body: JSON.stringify({
+            data: {
+              relatedMedia: {
+                set: [imageIds[0], imageIds[1]],
+              },
+            },
+          }),
+        });
+
+        expect(connectRes.status).toBe(200);
+
+        expect(connectRes.body.data.relatedMedia).toHaveLength(2);
+        expect(connectRes.body.data.relatedMedia[0]).toEqual(
+          expect.objectContaining({
+            id: images.body[0].id,
+          })
+        );
+        expect(connectRes.body.data.relatedMedia[1]).toEqual(
+          expect.objectContaining({
+            id: images.body[1].id,
+          })
+        );
       });
     });
   });
 
-  // see https://github.com/strapi/strapi/issues/14125
-  describe('File relations are correctly removed', () => {
-    test('Update an entity with a file correctly removes the relation between the entity and its old file', async () => {
-      const res = await rq({
-        method: 'PUT',
-        url: `/dogs/${data.dogs[0].data.id}?populate=*`,
+  describe('Upload with refId', () => {
+    const ref = 'api::dog.dog';
+    const field = 'profilePicture';
+
+    const uploadFor = (refId) =>
+      rq({
+        method: 'POST',
+        url: '/upload',
         formData: {
-          data: '{}',
-          'files.profilePicture': fs.createReadStream(path.join(__dirname, '../utils/strapi.jpg')),
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          refId,
+          ref,
+          field,
         },
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(res.body.data.attributes.profilePicture.data.id).not.toBe(
-        data.dogs[0].data.attributes.profilePicture.data.id
-      );
+    const findDog = (documentId, params = '') =>
+      rq({ method: 'GET', url: `/dogs/${documentId}?populate=${field}${params}` });
 
-      data.dogs[0] = res.body;
+    const countFiles = () => strapi.db.query('plugin::upload.file').count();
+
+    let dog;
+
+    beforeEach(async () => {
+      const res = await rq({ method: 'POST', url: '/dogs', body: { data: {} } });
+      dog = res.body.data;
     });
 
-    test('Update a file with an entity correctly removes the relation between the entity and its old file', async () => {
-      const fileId = data.dogs[1].data.attributes.profilePicture.data.id;
-      await strapi.entityService.update('plugin::upload.file', fileId, {
-        data: {
-          related: [
-            {
-              id: data.dogs[0].data.id,
-              __type: 'api::dog.dog',
-              __pivot: { field: 'profilePicture' },
-            },
-          ],
+    afterEach(async () => {
+      await rq({ method: 'DELETE', url: `/dogs/${dog.documentId}` });
+    });
+
+    test('A numeric refId links the file to the entry', async () => {
+      const res = await uploadFor(dog.id);
+
+      expect(res.statusCode).toBe(201);
+
+      const dogRes = await findDog(dog.documentId);
+
+      expect(dogRes.statusCode).toBe(200);
+      expect(dogRes.body.data[field]).toMatchObject({ id: res.body[0].id });
+
+      await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+    });
+
+    test('A documentId refId links the file to the entry', async () => {
+      const res = await uploadFor(dog.documentId);
+
+      expect(res.statusCode).toBe(201);
+
+      const dogRes = await findDog(dog.documentId);
+
+      expect(dogRes.statusCode).toBe(200);
+      expect(dogRes.body.data[field]).toMatchObject({
+        id: res.body[0].id,
+        documentId: res.body[0].documentId,
+      });
+
+      await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+    });
+
+    test('An unknown documentId refId returns 404 and persists no file', async () => {
+      const filesBefore = await countFiles();
+
+      const res = await uploadFor('unknowndocumentid0000000');
+
+      expect(res.statusCode).toBe(404);
+      expect(await countFiles()).toBe(filesBefore);
+
+      const dogRes = await findDog(dog.documentId);
+
+      expect(dogRes.body.data[field]).toBeNull();
+    });
+  });
+
+  describe('Upload with refId on a draft & publish content type', () => {
+    const ref = 'api::cat.cat';
+    const field = 'picture';
+
+    test('A documentId refId links the file to both the draft and the published entry', async () => {
+      const catRes = await rq({
+        method: 'POST',
+        url: '/cats?status=published',
+        body: { data: { name: 'Tom' } },
+      });
+
+      expect(catRes.statusCode).toBe(201);
+
+      const { documentId } = catRes.body.data;
+
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          refId: documentId,
+          ref,
+          field,
         },
       });
 
-      const res = await rq({
-        method: 'GET',
-        url: `/dogs/${data.dogs[0].data.id}?populate=*`,
-      });
-      expect(res.body.data.attributes.profilePicture.data.id).toBe(fileId);
+      expect(res.statusCode).toBe(201);
 
-      data.dogs[0] = res.body;
+      const [published, draft] = await Promise.all([
+        rq({ method: 'GET', url: `/cats/${documentId}?populate=${field}` }),
+        rq({ method: 'GET', url: `/cats/${documentId}?populate=${field}&status=draft` }),
+      ]);
+
+      expect(published.body.data[field]).toMatchObject({ id: res.body[0].id });
+      expect(draft.body.data[field]).toMatchObject({ id: res.body[0].id });
+
+      await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+      await rq({ method: 'DELETE', url: `/cats/${documentId}` });
+    });
+
+    test('A documentId refId link survives a republish', async () => {
+      const catRes = await rq({
+        method: 'POST',
+        url: '/cats?status=published',
+        body: { data: { name: 'Tom' } },
+      });
+
+      expect(catRes.statusCode).toBe(201);
+
+      const { documentId } = catRes.body.data;
+
+      const findPublishedRow = () =>
+        strapi.db
+          .query(ref)
+          .findOne({ where: { documentId, publishedAt: { $notNull: true } }, select: ['id'] });
+
+      const publishedBefore = await findPublishedRow();
+
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          refId: documentId,
+          ref,
+          field,
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+
+      await strapi.documents(ref).update({ documentId, data: { name: 'Tom 2' } });
+      await strapi.documents(ref).publish({ documentId });
+
+      const publishedAfter = await findPublishedRow();
+
+      // Publishing recreates the published row
+      expect(publishedAfter.id).not.toBe(publishedBefore.id);
+
+      const [published, draft] = await Promise.all([
+        rq({ method: 'GET', url: `/cats/${documentId}?populate=${field}` }),
+        rq({ method: 'GET', url: `/cats/${documentId}?populate=${field}&status=draft` }),
+      ]);
+
+      expect(published.body.data).toMatchObject({ name: 'Tom 2' });
+      expect(published.body.data[field]).toMatchObject({ id: res.body[0].id });
+      expect(draft.body.data[field]).toMatchObject({ id: res.body[0].id });
+
+      await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+      await rq({ method: 'DELETE', url: `/cats/${documentId}` });
+    });
+  });
+
+  describe('Upload with refId on a localized draft & publish content type', () => {
+    const ref = 'api::bird.bird';
+    const field = 'picture';
+
+    const findRows = (documentId) =>
+      strapi.db.query(ref).findMany({ where: { documentId }, populate: [field] });
+
+    test('A documentId refId links the file to every locale, draft and published', async () => {
+      const bird = await strapi
+        .documents(ref)
+        .create({ data: { name: 'Robin' }, locale: 'en', status: 'published' });
+      const { documentId } = bird;
+
+      await strapi
+        .documents(ref)
+        .update({ documentId, locale: 'fr', data: { name: 'Rouge-gorge' }, status: 'published' });
+
+      expect(await findRows(documentId)).toHaveLength(4);
+
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          refId: documentId,
+          ref,
+          field,
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+
+      const fileId = res.body[0].id;
+      const rows = await findRows(documentId);
+
+      expect(rows).toHaveLength(4);
+      rows.forEach((row) => {
+        expect(row[field]).toMatchObject({ id: fileId });
+      });
+
+      const frDraft = await rq({
+        method: 'GET',
+        url: `/birds/${documentId}?locale=fr&status=draft&populate=${field}`,
+      });
+
+      expect(frDraft.statusCode).toBe(200);
+      expect(frDraft.body.data).toMatchObject({ locale: 'fr', name: 'Rouge-gorge' });
+      expect(frDraft.body.data[field]).toMatchObject({ id: fileId });
+
+      // Republishing a locale recreates its published row; the link must follow
+      const findFrPublished = () =>
+        strapi.db.query(ref).findOne({
+          where: { documentId, locale: 'fr', publishedAt: { $notNull: true } },
+          populate: [field],
+        });
+
+      const frPublishedBefore = await findFrPublished();
+
+      await strapi
+        .documents(ref)
+        .update({ documentId, locale: 'fr', data: { name: 'Rouge-gorge 2' } });
+      await strapi.documents(ref).publish({ documentId, locale: 'fr' });
+
+      const frPublishedAfter = await findFrPublished();
+
+      expect(frPublishedAfter.id).not.toBe(frPublishedBefore.id);
+      expect(frPublishedAfter.name).toBe('Rouge-gorge 2');
+      expect(frPublishedAfter[field]).toMatchObject({ id: fileId });
+
+      await rq({ method: 'DELETE', url: `/upload/files/${fileId}` });
+      await strapi.documents(ref).delete({ documentId, locale: '*' });
+    });
+  });
+
+  describe('Upload with refId on a component', () => {
+    test('A documentId refId on a component ref returns 400 and persists no file', async () => {
+      const filesBefore = await strapi.db.query('plugin::upload.file').count();
+
+      const res = await rq({
+        method: 'POST',
+        url: '/upload',
+        formData: {
+          files: fs.createReadStream(path.join(__dirname, '../utils/rec.jpg')),
+          ref: 'default.todo',
+          field: 'docs',
+          refId: 'unknowndocumentid0000000',
+        },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(await strapi.db.query('plugin::upload.file').count()).toBe(filesBefore);
+    });
+  });
+
+  describe('File restriction', () => {
+    afterEach(() => {
+      strapi.config.set('plugin::upload.security', {});
+    });
+
+    /**
+     * These tests prove that MIME type is detected from file content and used for
+     * allow/deny and for the stored file.mime. "rejects when content is detectable
+     * but not in allow list" would pass without detection (declared/extension would
+     * allow); it only rejects because detection runs and finds image/jpeg. "stored
+     * mime is detected type for PDF" proves the saved file gets the detected MIME.
+     */
+    describe('MIME type detection (content-based)', () => {
+      const utilsPath = (name) => path.join(__dirname, '../utils', name);
+
+      test('stored mime is detected type for PDF when declared type is generic', async () => {
+        strapi.config.set('plugin::upload.security', { allowedTypes: ['application/pdf'] });
+        const res = await rq({
+          method: 'POST',
+          url: '/upload',
+          formData: {
+            files: {
+              path: utilsPath('rec.pdf'),
+              filename: 'document.pdf',
+              contentType: 'application/octet-stream',
+            },
+          },
+        });
+        expect(res.statusCode).toBe(201);
+        expect(res.body).toHaveLength(1);
+        expect(res.body[0].mime).toBe('application/pdf');
+        await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+      });
+
+      test('stored mime is detected type for JPEG when filename has no extension and Content-Type is generic', async () => {
+        strapi.config.set('plugin::upload.security', { allowedTypes: ['image/jpeg'] });
+        const res = await rq({
+          method: 'POST',
+          url: '/upload',
+          formData: {
+            files: {
+              path: utilsPath('rec.jpg'),
+              filename: 'data',
+              contentType: 'application/octet-stream',
+            },
+          },
+        });
+        expect(res.statusCode).toBe(201);
+        expect(res.body).toHaveLength(1);
+        expect(res.body[0].mime).toBe('image/jpeg');
+        await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+      });
+
+      test('stored mime is detected type for docx when no config and Content-Type is application/octet-stream', async () => {
+        strapi.config.set('plugin::upload.security', {});
+        const res = await rq({
+          method: 'POST',
+          url: '/upload',
+          formData: {
+            files: {
+              path: utilsPath('rec.docx'),
+              filename: 'document.docx',
+              contentType: 'application/octet-stream',
+            },
+          },
+        });
+        expect(res.statusCode).toBe(201);
+        expect(res.body).toHaveLength(1);
+        expect(res.body[0].mime).toBe(
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        );
+        await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+      });
+
+      test('rejects when content is detectable but not in allow list (extension/declared would allow)', async () => {
+        strapi.config.set('plugin::upload.security', { allowedTypes: ['application/pdf'] });
+        // Real JPEG content sent as fake.pdf – only content detection reveals image/jpeg, so we reject.
+        const res = await rq({
+          method: 'POST',
+          url: '/upload',
+          formData: {
+            files: {
+              path: utilsPath('rec.jpg'),
+              filename: 'fake.pdf',
+              contentType: 'application/pdf',
+            },
+          },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.body.error).toBeDefined();
+        expect(res.body.error.code || res.body.error.message).toBeTruthy();
+      });
+
+      describe('no-config vs with-config: same validation path, same stored mime', () => {
+        test('stored mime for docx (Content-Type octet-stream) is the same with empty config and with allowedTypes', async () => {
+          const formData = {
+            files: {
+              path: utilsPath('rec.docx'),
+              filename: 'document.docx',
+              contentType: 'application/octet-stream',
+            },
+          };
+          const docxMime =
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+          strapi.config.set('plugin::upload.security', {});
+          const resNoConfig = await rq({
+            method: 'POST',
+            url: '/upload',
+            formData: { ...formData },
+          });
+          expect(resNoConfig.statusCode).toBe(201);
+          expect(resNoConfig.body).toHaveLength(1);
+          const mimeNoConfig = resNoConfig.body[0].mime;
+          expect(mimeNoConfig).toBe(docxMime);
+          await rq({ method: 'DELETE', url: `/upload/files/${resNoConfig.body[0].id}` });
+
+          strapi.config.set('plugin::upload.security', {
+            allowedTypes: ['application/*'],
+          });
+          const resWithConfig = await rq({
+            method: 'POST',
+            url: '/upload',
+            formData: { ...formData },
+          });
+          expect(resWithConfig.statusCode).toBe(201);
+          expect(resWithConfig.body).toHaveLength(1);
+          const mimeWithConfig = resWithConfig.body[0].mime;
+          expect(mimeWithConfig).toBe(docxMime);
+          expect(mimeWithConfig).toBe(mimeNoConfig);
+          await rq({ method: 'DELETE', url: `/upload/files/${resWithConfig.body[0].id}` });
+        });
+
+        test('stored mime for PDF (Content-Type octet-stream) is the same with empty config and with allowedTypes', async () => {
+          const formData = {
+            files: {
+              path: utilsPath('rec.pdf'),
+              filename: 'document.pdf',
+              contentType: 'application/octet-stream',
+            },
+          };
+          const pdfMime = 'application/pdf';
+
+          strapi.config.set('plugin::upload.security', {});
+          const resNoConfig = await rq({
+            method: 'POST',
+            url: '/upload',
+            formData: { ...formData },
+          });
+          expect(resNoConfig.statusCode).toBe(201);
+          expect(resNoConfig.body).toHaveLength(1);
+          const mimeNoConfig = resNoConfig.body[0].mime;
+          expect(mimeNoConfig).toBe(pdfMime);
+          await rq({ method: 'DELETE', url: `/upload/files/${resNoConfig.body[0].id}` });
+
+          strapi.config.set('plugin::upload.security', {
+            allowedTypes: ['application/pdf'],
+          });
+          const resWithConfig = await rq({
+            method: 'POST',
+            url: '/upload',
+            formData: { ...formData },
+          });
+          expect(resWithConfig.statusCode).toBe(201);
+          expect(resWithConfig.body).toHaveLength(1);
+          const mimeWithConfig = resWithConfig.body[0].mime;
+          expect(mimeWithConfig).toBe(pdfMime);
+          expect(mimeWithConfig).toBe(mimeNoConfig);
+          await rq({ method: 'DELETE', url: `/upload/files/${resWithConfig.body[0].id}` });
+        });
+      });
+    });
+
+    describe('validation matrix (real detection)', () => {
+      const utilsPath = (name) => path.join(__dirname, '../utils', name);
+
+      const fixturePaths = {
+        jpg: utilsPath('rec.jpg'),
+        png: utilsPath('strapi.png'),
+        pdf: utilsPath('rec.pdf'),
+        docx: utilsPath('rec.docx'),
+        txt: utilsPath('rec.txt'),
+        unknown: utilsPath('rec.bin'),
+      };
+
+      const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+      // allowedList: undefined = allow all; [] = allow none; string[] = allow only these.
+      const MATRIX = [
+        {
+          description: 'declared in deny → reject',
+          allowedList: undefined,
+          bannedList: ['image/png'],
+          contentKind: 'png',
+          uploadedFileName: 'a.png',
+          uploadedFileDeclaredType: 'image/png',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'allow+deny: declared in ban → reject',
+          allowedList: ['image/jpeg', 'image/png'],
+          bannedList: ['image/png'],
+          contentKind: 'png',
+          uploadedFileName: 'a.png',
+          uploadedFileDeclaredType: 'image/png',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'extension MIME in deny → reject',
+          allowedList: undefined,
+          bannedList: ['image/png'],
+          contentKind: 'jpg',
+          uploadedFileName: 'a.png',
+          uploadedFileDeclaredType: 'image/jpeg',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'allow+deny: extension in ban → reject',
+          allowedList: ['image/*'],
+          bannedList: ['image/png'],
+          contentKind: 'jpg',
+          uploadedFileName: 'a.png',
+          uploadedFileDeclaredType: 'image/jpeg',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'declared=ext=detected, in allow → allow',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'jpg',
+          uploadedFileName: 'a.jpg',
+          uploadedFileDeclaredType: 'image/jpeg',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'declared=ext=detected (PNG), in allow → allow',
+          allowedList: ['image/png', 'image/jpeg'],
+          bannedList: [],
+          contentKind: 'png',
+          uploadedFileName: 'a.png',
+          uploadedFileDeclaredType: 'image/png',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'declared=ext=detected but not in allow → reject',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'png',
+          uploadedFileName: 'a.png',
+          uploadedFileDeclaredType: 'image/png',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'docx declared=ext=detected, in allow → allow',
+          allowedList: [DOCX_MIME],
+          bannedList: [],
+          contentKind: 'docx',
+          uploadedFileName: 'a.docx',
+          uploadedFileDeclaredType: DOCX_MIME,
+          expectedResult: 'allow',
+        },
+        {
+          description: 'detected in deny, declared≠detected (.jpg name, PNG content) → reject',
+          allowedList: ['image/jpeg'],
+          bannedList: ['image/png'],
+          contentKind: 'png',
+          uploadedFileName: 'a.jpg',
+          uploadedFileDeclaredType: 'image/jpeg',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'detected in deny (declared=ext=detected=png, deny png) → reject',
+          allowedList: undefined,
+          bannedList: ['image/png'],
+          contentKind: 'png',
+          uploadedFileName: 'a.png',
+          uploadedFileDeclaredType: 'image/png',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'no extension, detected in allow, declared generic → allow',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'jpg',
+          uploadedFileName: 'data',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'no extension, detected in allow (allow all) → allow',
+          allowedList: undefined,
+          bannedList: [],
+          contentKind: 'jpg',
+          uploadedFileName: 'data',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'no extension, detected not in allow → reject',
+          allowedList: ['application/pdf'],
+          bannedList: [],
+          contentKind: 'jpg',
+          uploadedFileName: 'data',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'detected matches extension, declared generic → allow',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'jpg',
+          uploadedFileName: 'a.jpg',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'detected in allow, extension mismatch (warn but allow)',
+          allowedList: ['image/jpeg', 'application/pdf'],
+          bannedList: [],
+          contentKind: 'jpg',
+          uploadedFileName: 'a.pdf',
+          uploadedFileDeclaredType: 'application/pdf',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'detected not in allow → reject',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'pdf',
+          uploadedFileName: 'a.pdf',
+          uploadedFileDeclaredType: 'application/pdf',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'explicit empty allow list + detectable → reject',
+          allowedList: [],
+          bannedList: [],
+          contentKind: 'jpg',
+          uploadedFileName: 'a.jpg',
+          uploadedFileDeclaredType: 'image/jpeg',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'undetectable, extension in allow, declared matches extension → allow',
+          allowedList: ['text/plain'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'a.txt',
+          uploadedFileDeclaredType: 'text/plain',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'undetectable, extension in allow, declared generic → allow',
+          allowedList: ['text/plain'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'a.txt',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'undetectable, extension in allow, declared empty → allow',
+          allowedList: ['text/plain'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'a.txt',
+          uploadedFileDeclaredType: '',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'undetectable, extension not in allow → reject',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'a.txt',
+          uploadedFileDeclaredType: 'text/plain',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'undetectable, extension in allow (extension type used) → allow',
+          allowedList: ['text/plain', 'application/pdf'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'a.pdf',
+          uploadedFileDeclaredType: 'text/plain',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'explicit empty allow + undetectable with extension → reject',
+          allowedList: [],
+          bannedList: [],
+          contentKind: 'unknown',
+          uploadedFileName: 'a.xyz',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'no config (allow all), undetectable, declared generic → allow',
+          allowedList: undefined,
+          bannedList: [],
+          contentKind: 'unknown',
+          uploadedFileName: 'a.xyz',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'deny only, type not in deny → allow',
+          allowedList: undefined,
+          bannedList: ['image/png'],
+          contentKind: 'jpg',
+          uploadedFileName: 'a.jpg',
+          uploadedFileDeclaredType: 'image/jpeg',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'undetectable unknown ext, declared in allow but no ext MIME → reject',
+          allowedList: ['text/plain'],
+          bannedList: [],
+          contentKind: 'unknown',
+          uploadedFileName: 'a.xyz',
+          uploadedFileDeclaredType: 'text/plain',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'undetectable unknown ext, declared not in allow → reject',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'unknown',
+          uploadedFileName: 'a.xyz',
+          uploadedFileDeclaredType: 'text/plain',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'undetectable, no extension, declared generic → reject',
+          allowedList: ['text/plain'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'noext',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'undetectable, no extension, declared specific → reject',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'noext',
+          uploadedFileDeclaredType: 'text/plain',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'undetectable, no extension, declared in allow (declared type used) → allow',
+          allowedList: ['text/plain'],
+          bannedList: [],
+          contentKind: 'txt',
+          uploadedFileName: 'noext',
+          uploadedFileDeclaredType: 'text/plain',
+          expectedResult: 'allow',
+        },
+        {
+          description: 'undetectable unknown ext, declared generic → reject',
+          allowedList: ['image/jpeg'],
+          bannedList: [],
+          contentKind: 'unknown',
+          uploadedFileName: 'file.xyz',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'reject',
+        },
+        {
+          description: 'docx detected, application/* in allow → allow',
+          allowedList: ['application/*'],
+          bannedList: [],
+          contentKind: 'docx',
+          uploadedFileName: 'a.docx',
+          uploadedFileDeclaredType: DOCX_MIME,
+          expectedResult: 'allow',
+        },
+        {
+          description: 'docx detected, declared generic → allow',
+          allowedList: [DOCX_MIME],
+          bannedList: [],
+          contentKind: 'docx',
+          uploadedFileName: 'a.docx',
+          uploadedFileDeclaredType: 'application/octet-stream',
+          expectedResult: 'allow',
+        },
+      ];
+
+      for (const row of MATRIX) {
+        test(row.description, async () => {
+          const config = {
+            ...(row.allowedList !== undefined && { allowedTypes: row.allowedList }),
+            ...(row.bannedList.length > 0 && { deniedTypes: row.bannedList }),
+          };
+          strapi.config.set('plugin::upload.security', config);
+
+          const res = await rq({
+            method: 'POST',
+            url: '/upload',
+            formData: {
+              files: {
+                path: fixturePaths[row.contentKind],
+                filename: row.uploadedFileName,
+                contentType: row.uploadedFileDeclaredType,
+              },
+            },
+          });
+
+          if (row.expectedResult === 'allow') {
+            expect(res.statusCode).toBe(201);
+            expect(res.body).toHaveLength(1);
+            await rq({ method: 'DELETE', url: `/upload/files/${res.body[0].id}` });
+          } else {
+            expect(res.statusCode).toBe(400);
+            expect(res.body.error).toBeDefined();
+            expect(res.body.error.code || res.body.error.message).toBeTruthy();
+          }
+        });
+      }
     });
   });
 });

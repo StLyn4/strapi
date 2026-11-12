@@ -1,6 +1,7 @@
 'use strict';
 
-const { prop } = require('lodash/fp');
+const { omit } = require('lodash');
+
 const { createTestBuilder } = require('api-tests/builder');
 const { createStrapiInstance } = require('api-tests/strapi');
 const { createRequest, createAuthRequest } = require('api-tests/request');
@@ -144,7 +145,8 @@ describe('Admin Permissions - Conditions', () => {
         url: `/content-manager/collection-types/api::category.category`,
         body: category,
       });
-      category.id = body.id;
+      category.id = body.data.id;
+      category.documentId = body.data.documentId;
     }
 
     // Update the local data store
@@ -155,7 +157,7 @@ describe('Admin Permissions - Conditions', () => {
 
   const deleteFixtures = async () => {
     // Delete users
-    const usersId = localTestData.users.map(prop('id'));
+    const usersId = localTestData.users.map((user) => user?.id);
     await utils.deleteUsersById(usersId);
 
     // Delete the foobar role
@@ -169,11 +171,11 @@ describe('Admin Permissions - Conditions', () => {
       .build();
 
     strapi = await createStrapiInstance({
-      bootstrap: ({ strapi }) => {
+      bootstrap({ strapi }) {
         // Create custom conditions
-        return strapi.admin.services.permission.conditionProvider.registerMany(
-          localTestData.customConditions
-        );
+        return strapi
+          .service('admin::permission')
+          .conditionProvider.registerMany(localTestData.customConditions);
       },
     });
     utils = createUtils(strapi);
@@ -194,65 +196,65 @@ describe('Admin Permissions - Conditions', () => {
     const res = await rq({
       method: 'POST',
       url: `/content-manager/collection-types/api::article.article`,
-      body: { ...localTestData.cheapArticle, category: localTestData.categories[0].id },
+      body: { ...localTestData.cheapArticle, category: localTestData.categories[0].documentId },
     });
 
     const resExpensive = await rq({
       method: 'POST',
       url: `/content-manager/collection-types/api::article.article`,
-      body: { ...localTestData.expensiveArticle, category: localTestData.categories[1].id },
+      body: { ...localTestData.expensiveArticle, category: localTestData.categories[1].documentId },
     });
 
-    expect(res.statusCode).toBe(200);
-    expect(resExpensive.statusCode).toBe(200);
+    expect(res.statusCode).toBe(201);
+    expect(resExpensive.statusCode).toBe(201);
 
-    localTestData.cheapArticle.id = res.body.id;
-    localTestData.expensiveArticle.id = resExpensive.body.id;
+    localTestData.cheapArticle.documentId = res.body.data.documentId;
+    localTestData.expensiveArticle.documentId = resExpensive.body.data.documentId;
   });
 
   test('User can read cheap articles', async () => {
-    const { id } = localTestData.cheapArticle;
+    const { documentId } = localTestData.cheapArticle;
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'GET',
-      url: `/content-manager/collection-types/api::article.article/${id}`,
+      url: `/content-manager/collection-types/api::article.article/${documentId}`,
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(localTestData.cheapArticle);
+    expect(res.body.data).toMatchObject(localTestData.cheapArticle);
   });
 
   test('User cannot read expensive articles', async () => {
-    const { id } = localTestData.expensiveArticle;
+    const { documentId } = localTestData.expensiveArticle;
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'GET',
-      url: `/content-manager/collection-types/api::article.article/${id}`,
+      url: `/content-manager/collection-types/api::article.article/${documentId}`,
     });
 
     expect(res.statusCode).toBe(403);
   });
 
   test('User can update cheap articles', async () => {
-    const { id } = localTestData.cheapArticle;
+    const { documentId } = localTestData.cheapArticle;
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'PUT',
-      url: `/content-manager/collection-types/api::article.article/${id}`,
+      url: `/content-manager/collection-types/api::article.article/${documentId}`,
       body: { ...localTestData.cheapArticle, title: 'New title' },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject({ ...localTestData.cheapArticle, title: 'New title' });
+    expect(res.body.data).toMatchObject({ ...localTestData.cheapArticle, title: 'New title' });
     localTestData.cheapArticle.title = 'New title';
   });
 
   test('User cannot update expensive articles', async () => {
-    const { id } = localTestData.expensiveArticle;
+    const { documentId } = localTestData.expensiveArticle;
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'PUT',
-      url: `/content-manager/collection-types/api::article.article/${id}`,
+      url: `/content-manager/collection-types/api::article.article/${documentId}`,
       body: { ...localTestData.expensiveArticle, title: 'New title' },
     });
 
@@ -260,45 +262,64 @@ describe('Admin Permissions - Conditions', () => {
   });
 
   test('User can publish cheap articles', async () => {
-    const { id } = localTestData.cheapArticle;
+    const { documentId } = localTestData.cheapArticle;
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'POST',
-      url: `/content-manager/collection-types/api::article.article/${id}/actions/publish`,
+      url: `/content-manager/collection-types/api::article.article/${documentId}/actions/publish`,
+      body: { ...localTestData.cheapArticle, category: localTestData.categories[0].documentId },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toMatchObject(localTestData.cheapArticle);
+    expect(res.body.data).toMatchObject(localTestData.cheapArticle);
   });
 
   test('User cannot publish expensive articles', async () => {
-    const { id } = localTestData.expensiveArticle;
+    const { documentId } = localTestData.expensiveArticle;
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'POST',
-      url: `/content-manager/collection-types/api::article.article/${id}/actions/publish`,
+      url: `/content-manager/collection-types/api::article.article/${documentId}/actions/publish`,
     });
 
     expect(res.statusCode).toBe(403);
   });
 
   test('User can delete cheap articles', async () => {
-    const { id } = localTestData.cheapArticle;
+    // Create a new cheap draft article
+    const { body } = await requests.admin({
+      method: 'POST',
+      url: `/content-manager/collection-types/api::article.article`,
+      body: {
+        ...omit(localTestData.cheapArticle, 'documentId'),
+        category: localTestData.categories[0].documentId,
+      },
+    });
+
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'DELETE',
-      url: `/content-manager/collection-types/api::article.article/${id}`,
+      url: `/content-manager/collection-types/api::article.article/${body.data.documentId}`,
     });
 
     expect(res.statusCode).toBe(200);
   });
 
   test('User cannot delete expensive articles', async () => {
-    const { id } = localTestData.expensiveArticle;
+    // Create a new expensive draft article
+    const { body } = await requests.admin({
+      method: 'POST',
+      url: `/content-manager/collection-types/api::article.article`,
+      body: {
+        ...omit(localTestData.expensiveArticle, 'documentId'),
+        category: localTestData.categories[1].documentId,
+      },
+    });
+
     const rq = getUserRequest(0);
     const res = await rq({
       method: 'DELETE',
-      url: `/content-manager/collection-types/api::article.article/${id}`,
+      url: `/content-manager/collection-types/api::article.article/${body.data.documentId}`,
     });
 
     expect(res.statusCode).toBe(403);

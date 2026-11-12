@@ -1,5 +1,4 @@
-import { translatedErrors as errorsTrads } from '@strapi/helper-plugin';
-import { RelationKind } from '@strapi/types/dist/types/core/attributes';
+import { translatedErrors as errorsTrads } from '@strapi/admin/strapi-admin';
 import uniq from 'lodash/uniq';
 import * as yup from 'yup';
 
@@ -9,12 +8,15 @@ import { toRegressedEnumValue } from '../../../utils/toRegressedEnumValue';
 
 import {
   alreadyUsedAttributeNames,
+  createStringShape,
   createTextShape,
   isMinSuperiorThanMax,
   isNameAllowed,
   NAME_REGEX,
   validators,
 } from './validation/common';
+
+import type { Schema } from '@strapi/types';
 
 export const attributeTypes = {
   date(usedAttributeNames: Array<string>, reservedNames: Array<string>) {
@@ -62,12 +64,12 @@ export const attributeTypes = {
       max: yup
         .string()
         .nullable()
-        .matches(/^-?\d*$/, errorsTrads.regex),
+        .matches(/^-?\d*$/, errorsTrads.regex.id),
       min: yup
         .string()
         .nullable()
         .test(isMinSuperiorThanMax<string | null>())
-        .matches(/^-?\d*$/, errorsTrads.regex),
+        .matches(/^-?\d*$/, errorsTrads.regex.id),
     };
 
     return yup.object(shape);
@@ -89,7 +91,7 @@ export const attributeTypes = {
       required: validators.required(),
       max: validators.max(),
       min: validators.min(),
-      component: yup.string().required(errorsTrads.required),
+      component: yup.string().required(errorsTrads.required.id),
     };
 
     return yup.object(shape);
@@ -150,8 +152,8 @@ export const attributeTypes = {
         .string()
         .test(alreadyUsedAttributeNames(usedAttributeNames))
         .test(isNameAllowed(reservedNames))
-        .matches(GRAPHQL_ENUM_REGEX, errorsTrads.regex)
-        .required(errorsTrads.required),
+        .matches(GRAPHQL_ENUM_REGEX, errorsTrads.regex.id)
+        .required(errorsTrads.required.id),
       type: validators.type(),
       default: validators.default(),
       unique: validators.unique(),
@@ -159,7 +161,12 @@ export const attributeTypes = {
       enum: yup
         .array()
         .of(yup.string())
-        .min(1, errorsTrads.min)
+        /**
+         * CTB renders field errors as `formatMessage({ id: error })` with no values, so the
+         * message must not interpolate anything — the generic `errorsTrads.min` id would leak
+         * its `{min}` placeholder. See strapi/strapi#19030.
+         */
+        .min(1, getTrad('error.validation.enum-empty'))
         .test({
           name: 'areEnumValuesUnique',
           message: getTrad('error.validation.enum-duplicate'),
@@ -277,18 +284,19 @@ export const attributeTypes = {
       initialData: { targetAttribute?: string };
       modifiedData: {
         name?: string;
-        relation?: RelationKind.WithTarget;
+        relation?: Schema.Attribute.RelationKind.WithTarget;
         targetAttribute?: string;
       };
     }
   ) {
     const shape = {
       name: validators.name(usedAttributeNames, reservedNames),
-      target: yup.string().required(errorsTrads.required),
+      target: yup.string().required(errorsTrads.required.id),
       relation: yup.string().required(),
       type: yup.string().required(),
+      required: validators.required(),
       targetAttribute: yup.lazy(() => {
-        const relationType = getRelationType(modifiedData.relation, modifiedData.targetAttribute);
+        const relationType = getRelationType(modifiedData.relation!, modifiedData.targetAttribute);
 
         if (relationType === 'oneWay' || relationType === 'manyWay') {
           return yup.string().nullable();
@@ -300,12 +308,12 @@ export const attributeTypes = {
           modifiedData.name,
         ];
 
-        const forbiddenTargetAttributeName = initialForbiddenName.filter(
-          (val) => val !== initialData.targetAttribute
+        const forbiddenTargetAttributeName = new Set(
+          initialForbiddenName.filter((val) => val !== initialData.targetAttribute)
         );
 
         return schema
-          .matches(NAME_REGEX, errorsTrads.regex)
+          .matches(NAME_REGEX, errorsTrads.regex.id)
           .test({
             name: 'forbiddenTargetAttributeName',
             message: getTrad('error.validation.relation.targetAttribute-taken'),
@@ -314,10 +322,10 @@ export const attributeTypes = {
                 return false;
               }
 
-              return !forbiddenTargetAttributeName.includes(value);
+              return !forbiddenTargetAttributeName.has(value);
             },
           })
-          .required(errorsTrads.required);
+          .required(errorsTrads.required.id);
       }),
     };
 
@@ -350,7 +358,7 @@ export const attributeTypes = {
     return yup.object(shape);
   },
   string(usedAttributeNames: Array<string>, reservedNames: Array<string>) {
-    const shape = createTextShape(usedAttributeNames, reservedNames);
+    const shape = createStringShape(usedAttributeNames, reservedNames);
 
     return yup.object(shape);
   },

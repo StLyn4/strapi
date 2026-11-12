@@ -1,5 +1,4 @@
 import { objectType } from 'nexus';
-import { prop } from 'lodash/fp';
 import type { Schema } from '@strapi/types';
 import type { Context } from '../types';
 
@@ -12,16 +11,16 @@ export default ({ strapi }: Context) => {
      */
     buildResponseDefinition(contentType: Schema.ContentType) {
       const name = naming.getEntityResponseName(contentType);
-      const entityName = naming.getEntityName(contentType);
+      const typeName = naming.getTypeName(contentType);
 
       return objectType({
         name,
 
         definition(t) {
           t.field('data', {
-            type: entityName,
+            type: typeName,
 
-            resolve: prop('value'),
+            resolve: (parent) => parent?.value,
           });
         },
       });

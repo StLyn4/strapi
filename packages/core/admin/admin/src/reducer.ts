@@ -1,6 +1,7 @@
 import { createSlice } from '@reduxjs/toolkit';
 
 import { PermissionMap } from './types/permissions';
+import { AUTH_COOKIE_NAME, getCookieValue, setCookie, deleteCookie } from './utils/cookies';
 
 import type { PayloadAction } from '@reduxjs/toolkit';
 
@@ -16,10 +17,26 @@ interface AppState {
     currentTheme: ThemeName;
     availableThemes: string[];
   };
+  token?: string | null;
 }
+
+const STORAGE_KEYS = {
+  TOKEN: 'jwtToken',
+  STATUS: 'isLoggedIn',
+};
 
 const THEME_LOCAL_STORAGE_KEY = 'STRAPI_THEME';
 const LANGUAGE_LOCAL_STORAGE_KEY = 'strapi-admin-language';
+
+export const getStoredToken = (): string | null => {
+  const fromLocalStorage = localStorage.getItem(STORAGE_KEYS.TOKEN);
+  if (fromLocalStorage) {
+    return JSON.parse(fromLocalStorage);
+  }
+
+  const fromCookie = getCookieValue(AUTH_COOKIE_NAME);
+  return fromCookie ?? null;
+};
 
 const adminSlice = createSlice({
   name: 'admin',
@@ -34,12 +51,10 @@ const adminSlice = createSlice({
         availableThemes: [],
         currentTheme: localStorage.getItem(THEME_LOCAL_STORAGE_KEY) || 'system',
       },
+      token: null,
     } as AppState;
   },
   reducers: {
-    setAdminPermissions(state, action: PayloadAction<Partial<PermissionMap>>) {
-      state.permissions = action.payload;
-    },
     setAppTheme(state, action: PayloadAction<ThemeName>) {
       state.theme.currentTheme = action.payload;
       window.localStorage.setItem(THEME_LOCAL_STORAGE_KEY, action.payload);
@@ -53,20 +68,37 @@ const adminSlice = createSlice({
       window.localStorage.setItem(LANGUAGE_LOCAL_STORAGE_KEY, action.payload);
       document.documentElement.setAttribute('lang', action.payload);
     },
+    setToken(state, action: PayloadAction<string | null>) {
+      state.token = action.payload;
+    },
+    login(state, action: PayloadAction<{ token: string; persist?: boolean }>) {
+      const { token, persist } = action.payload;
+
+      if (!persist) {
+        setCookie(AUTH_COOKIE_NAME, token);
+        // Drop a previous "remember me" token so getToken() cannot keep
+        // authenticating as the last persisted user after a new session.
+        window.localStorage.removeItem(STORAGE_KEYS.TOKEN);
+      } else {
+        window.localStorage.setItem(STORAGE_KEYS.TOKEN, JSON.stringify(token));
+        deleteCookie(AUTH_COOKIE_NAME);
+      }
+      window.localStorage.setItem(STORAGE_KEYS.STATUS, 'true');
+      state.token = token;
+    },
+    logout(state) {
+      state.token = null;
+      deleteCookie(AUTH_COOKIE_NAME);
+      window.localStorage.removeItem(STORAGE_KEYS.TOKEN);
+      window.localStorage.removeItem(STORAGE_KEYS.STATUS);
+    },
   },
 });
 
 const reducer = adminSlice.reducer;
 
-const { setAdminPermissions, setAppTheme, setAvailableThemes, setLocale } = adminSlice.actions;
+export const { setAppTheme, setAvailableThemes, setLocale, setToken, logout, login } =
+  adminSlice.actions;
 
-export {
-  reducer,
-  setAdminPermissions,
-  setAppTheme,
-  setAvailableThemes,
-  setLocale,
-  THEME_LOCAL_STORAGE_KEY,
-  LANGUAGE_LOCAL_STORAGE_KEY,
-};
+export { reducer, THEME_LOCAL_STORAGE_KEY, LANGUAGE_LOCAL_STORAGE_KEY };
 export type { AppState, ThemeName };

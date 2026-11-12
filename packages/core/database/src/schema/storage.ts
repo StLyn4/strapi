@@ -24,14 +24,32 @@ export default (db: Database) => {
   };
 
   return {
-    async read() {
+    async read(): Promise<{
+      id: number;
+      time: Date;
+      hash: string;
+      schema: Schema;
+    } | null> {
       await checkTableExists();
+
+      // NOTE: We get the ID first before fetching the exact entry for performance on MySQL/MariaDB
+      // See: https://github.com/strapi/strapi/issues/20312
+      const getSchemaID = await db
+        .getConnection()
+        .select('id')
+        .from(TABLE_NAME)
+        .orderBy('time', 'DESC')
+        .first();
+
+      if (!getSchemaID) {
+        return null;
+      }
 
       const res = await db
         .getConnection()
         .select('*')
         .from(TABLE_NAME)
-        .orderBy('time', 'DESC')
+        .where({ id: getSchemaID.id })
         .first();
 
       if (!res) {
@@ -47,7 +65,12 @@ export default (db: Database) => {
     },
 
     hashSchema(schema: Schema) {
-      return crypto.createHash('md5').update(JSON.stringify(schema)).digest('hex');
+      // Sort tables by name for deterministic hashing regardless of insertion order
+      const sorted = {
+        ...schema,
+        tables: schema.tables.toSorted((a, b) => a.name.localeCompare(b.name)),
+      };
+      return crypto.createHash('sha256').update(JSON.stringify(sorted)).digest('hex');
     },
 
     async add(schema: Schema) {

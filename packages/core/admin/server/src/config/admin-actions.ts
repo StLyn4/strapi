@@ -50,6 +50,12 @@ export const actions = [
     section: 'settings',
     category: 'users and roles',
     subCategory: 'users',
+    aliases: [
+      {
+        actionId: 'plugin::content-manager.explorer.read',
+        subjects: ['admin::user'],
+      },
+    ],
   },
   {
     uid: 'users.update',
@@ -82,6 +88,12 @@ export const actions = [
     section: 'settings',
     category: 'users and roles',
     subCategory: 'roles',
+    aliases: [
+      {
+        actionId: 'plugin::content-manager.explorer.read',
+        subjects: ['admin::role'],
+      },
+    ],
   },
   {
     uid: 'roles.update',
@@ -106,6 +118,54 @@ export const actions = [
     section: 'settings',
     category: 'api tokens',
     subCategory: 'api Tokens',
+  },
+  {
+    uid: 'admin-tokens.access',
+    displayName: 'Access the Admin tokens settings page',
+    pluginName: 'admin',
+    section: 'settings',
+    category: 'admin tokens',
+    subCategory: 'admin tokens',
+  },
+  {
+    uid: 'admin-tokens.create',
+    displayName: 'Create (generate)',
+    pluginName: 'admin',
+    section: 'settings',
+    category: 'admin tokens',
+    subCategory: 'general',
+  },
+  {
+    uid: 'admin-tokens.read',
+    displayName: 'Read',
+    pluginName: 'admin',
+    section: 'settings',
+    category: 'admin tokens',
+    subCategory: 'general',
+  },
+  {
+    uid: 'admin-tokens.update',
+    displayName: 'Update',
+    pluginName: 'admin',
+    section: 'settings',
+    category: 'admin tokens',
+    subCategory: 'general',
+  },
+  {
+    uid: 'admin-tokens.regenerate',
+    displayName: 'Regenerate',
+    pluginName: 'admin',
+    section: 'settings',
+    category: 'admin tokens',
+    subCategory: 'general',
+  },
+  {
+    uid: 'admin-tokens.delete',
+    displayName: 'Delete (revoke)',
+    pluginName: 'admin',
+    section: 'settings',
+    category: 'admin tokens',
+    subCategory: 'general',
   },
   {
     uid: 'api-tokens.create',
@@ -160,6 +220,13 @@ export const actions = [
     pluginName: 'admin',
     section: 'settings',
     category: 'project',
+  },
+  {
+    uid: 'debug-dump.read',
+    displayName: 'Generate a support debug dump',
+    pluginName: 'admin',
+    section: 'settings',
+    category: 'debug and support',
   },
   {
     uid: 'transfer.tokens.access',

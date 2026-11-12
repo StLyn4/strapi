@@ -1,46 +1,57 @@
 import * as React from 'react';
 
-import {
-  Permission,
-  hasPermissions,
-  useAppInfo,
-  useRBACProvider,
-  useStrapiApp,
-  StrapiAppContextValue,
-} from '@strapi/helper-plugin';
-import { Cog, Puzzle, ShoppingCart } from '@strapi/icons';
+import { Cog, ShoppingCart, House } from '@strapi/icons';
 import cloneDeep from 'lodash/cloneDeep';
-import { useSelector } from 'react-redux';
 
-import { selectAdminPermissions } from '../selectors';
+import { useTypedSelector } from '../core/store/hooks';
+import { getAdminUserId, useAuth, type AuthContextValue } from '../features/Auth';
+import { StrapiAppContextValue, useStrapiApp } from '../features/StrapiApp';
+import { StrapiUpdateSeverity } from '../utils/strapiUpdate';
+import { hideCloudDeployMenuLinkInProduction } from '../utils/widgetVisibility';
 
 /* -------------------------------------------------------------------------------------------------
  * useMenu
  * -----------------------------------------------------------------------------------------------*/
 
-type MenuItem = StrapiAppContextValue['menu'][number];
+export type MenuItem = Omit<StrapiAppContextValue['menu'][number], 'Component'> & {
+  navigationLink?: string;
+};
+export type MobileMenuItem = {
+  to: string;
+  target?: string;
+  link?: string;
+};
 
 export interface Menu {
   generalSectionLinks: MenuItem[];
   pluginsSectionLinks: MenuItem[];
+  topMobileNavigation: MobileMenuItem[];
+  burgerMobileNavigation: MobileMenuItem[];
   isLoading: boolean;
 }
 
-const useMenu = () => {
-  const { allPermissions: userPermissions } = useRBACProvider();
-  const { shouldUpdateStrapi } = useAppInfo();
-  const { menu } = useStrapiApp();
-  const permissions = useSelector(selectAdminPermissions);
+const useMenu = (strapiUpdateSeverity: StrapiUpdateSeverity, currentEnvironment?: string) => {
+  const checkUserHasPermissions = useAuth(
+    'useMenu',
+    (state) => state.checkUserHasPermissions,
+    true
+  );
+  const adminUserId = useAuth('useMenu', (state) => getAdminUserId(state.user));
+  const rawMenu = useStrapiApp('useMenu', (state) => state.menu);
+  const menu = React.useMemo(() => normalizeMenuLinks(rawMenu), [rawMenu]);
+  const isLoadingAuth = useAuth('useMenu', (state) => state.isLoading);
+  const permissions = useTypedSelector((state) => state.admin_app.permissions);
   const [menuWithUserPermissions, setMenuWithUserPermissions] = React.useState<Menu>({
     generalSectionLinks: [
       {
-        icon: Puzzle,
+        icon: House,
         intlLabel: {
-          id: 'global.plugins',
-          defaultMessage: 'Plugins',
+          id: 'global.home',
+          defaultMessage: 'Home',
         },
-        to: '/list-plugins',
-        permissions: permissions.marketplace?.main ?? [],
+        to: '/',
+        permissions: [],
+        position: 0,
       },
       {
         icon: ShoppingCart,
@@ -48,8 +59,10 @@ const useMenu = () => {
           id: 'global.marketplace',
           defaultMessage: 'Marketplace',
         },
-        to: '/marketplace',
+        to: 'https://market.strapi.io',
+        target: '_blank',
         permissions: permissions.marketplace?.main ?? [],
+        position: 7,
       },
       {
         icon: Cog,
@@ -62,40 +75,98 @@ const useMenu = () => {
         // using the settings menu
         permissions: [],
         notificationsCount: 0,
+        position: 9,
       },
     ],
     pluginsSectionLinks: [],
+    topMobileNavigation: [
+      {
+        to: '/',
+      },
+      {
+        to: 'content-manager',
+      },
+      {
+        to: 'plugins/content-releases',
+      },
+      {
+        to: 'plugins/upload',
+      },
+    ],
+    burgerMobileNavigation: [
+      {
+        to: '/settings',
+      },
+    ],
     isLoading: true,
   });
   const generalSectionLinksRef = React.useRef(menuWithUserPermissions.generalSectionLinks);
+  const resolvedAdminUserIdRef = React.useRef<typeof adminUserId>();
+  const resolvedPermissionsRef = React.useRef(permissions);
 
   React.useEffect(() => {
-    async function applyMenuPermissions() {
-      const authorizedPluginSectionLinks = await getPluginSectionLinks(userPermissions, menu);
-
-      const authorizedGeneralSectionLinks = await getGeneralLinks(
-        userPermissions,
-        generalSectionLinksRef.current,
-        shouldUpdateStrapi
-      );
-
-      setMenuWithUserPermissions((state) => ({
-        ...state,
-        generalSectionLinks: authorizedGeneralSectionLinks,
-        pluginsSectionLinks: authorizedPluginSectionLinks,
-        isLoading: false,
-      }));
+    if (isLoadingAuth) {
+      return undefined;
     }
 
-    applyMenuPermissions();
+    let cancelled = false;
+
+    async function applyMenuPermissions() {
+      const authorizedPluginSectionLinks = await getPluginSectionLinks(
+        menu,
+        checkUserHasPermissions
+      );
+
+      const authorizedGeneralSectionLinks = await getGeneralLinks(
+        generalSectionLinksRef.current,
+        strapiUpdateSeverity,
+        checkUserHasPermissions
+      );
+
+      if (!cancelled) {
+        resolvedAdminUserIdRef.current = adminUserId;
+        resolvedPermissionsRef.current = permissions;
+        setMenuWithUserPermissions((state) => ({
+          ...state,
+          generalSectionLinks: authorizedGeneralSectionLinks,
+          pluginsSectionLinks: hideCloudDeployMenuLinkInProduction(
+            authorizedPluginSectionLinks,
+            currentEnvironment
+          ),
+          isLoading: false,
+        }));
+      }
+    }
+
+    void applyMenuPermissions();
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     setMenuWithUserPermissions,
     generalSectionLinksRef,
-    userPermissions,
     menu,
     permissions,
-    shouldUpdateStrapi,
+    strapiUpdateSeverity,
+    checkUserHasPermissions,
+    currentEnvironment,
+    adminUserId,
+    isLoadingAuth,
   ]);
+
+  if (
+    isLoadingAuth ||
+    resolvedAdminUserIdRef.current !== adminUserId ||
+    resolvedPermissionsRef.current !== permissions
+  ) {
+    return {
+      ...menuWithUserPermissions,
+      generalSectionLinks: [],
+      pluginsSectionLinks: [],
+      isLoading: true,
+    };
+  }
 
   return menuWithUserPermissions;
 };
@@ -105,16 +176,17 @@ const useMenu = () => {
  * -----------------------------------------------------------------------------------------------*/
 
 const getGeneralLinks = async (
-  userPermissions: Permission[],
   generalSectionRawLinks: MenuItem[],
-  shouldUpdateStrapi: boolean = false
+  strapiUpdateSeverity: StrapiUpdateSeverity = 'none',
+  checkUserHasPermissions: AuthContextValue['checkUserHasPermissions']
 ) => {
+  const generalSectionLinks = normalizeMenuLinks(generalSectionRawLinks);
   const generalSectionLinksPermissions = await Promise.all(
-    generalSectionRawLinks.map(({ permissions }) => hasPermissions(userPermissions, permissions))
+    generalSectionLinks.map(({ permissions }) => checkUserHasPermissions(permissions))
   );
 
-  const authorizedGeneralSectionLinks = generalSectionRawLinks.filter(
-    (_, index) => generalSectionLinksPermissions[index]
+  const authorizedGeneralSectionLinks = generalSectionLinks.filter(
+    (_, index) => generalSectionLinksPermissions[index].length > 0
   );
 
   const settingsLinkIndex = authorizedGeneralSectionLinks.findIndex(
@@ -127,24 +199,74 @@ const getGeneralLinks = async (
 
   const authorizedGeneralLinksClone = cloneDeep(authorizedGeneralSectionLinks);
 
-  authorizedGeneralLinksClone[settingsLinkIndex].notificationsCount = shouldUpdateStrapi ? 1 : 0;
+  authorizedGeneralLinksClone[settingsLinkIndex].notificationsCount =
+    strapiUpdateSeverity !== 'none' ? 1 : 0;
 
   return authorizedGeneralLinksClone;
 };
 
 const getPluginSectionLinks = async (
-  userPermissions: Permission[],
-  pluginsSectionRawLinks: MenuItem[]
+  pluginsSectionRawLinks: MenuItem[],
+  checkUserHasPermissions: AuthContextValue['checkUserHasPermissions']
 ) => {
+  const pluginSectionLinks = normalizeMenuLinks(pluginsSectionRawLinks);
   const pluginSectionLinksPermissions = await Promise.all(
-    pluginsSectionRawLinks.map(({ permissions }) => hasPermissions(userPermissions, permissions))
+    pluginSectionLinks.map(({ permissions }) => checkUserHasPermissions(permissions))
   );
 
-  const authorizedPluginSectionLinks = pluginsSectionRawLinks.filter(
-    (_, index) => pluginSectionLinksPermissions[index]
+  const authorizedPluginSectionLinks = pluginSectionLinks.filter(
+    (_, index) => pluginSectionLinksPermissions[index].length > 0
   );
 
   return authorizedPluginSectionLinks;
 };
 
-export { useMenu };
+const normalizeMenuLinks = (links: unknown): MenuItem[] => {
+  if (!Array.isArray(links)) {
+    return [];
+  }
+
+  const isValidIcon = (icon: unknown) => {
+    if (typeof icon === 'string' || typeof icon === 'function' || React.isValidElement(icon)) {
+      return true;
+    }
+
+    if (!icon || typeof icon !== 'object') {
+      return false;
+    }
+
+    const reactType = (icon as { $$typeof?: symbol }).$$typeof;
+
+    return (
+      reactType === Symbol.for('react.forward_ref') ||
+      reactType === Symbol.for('react.memo') ||
+      reactType === Symbol.for('react.lazy')
+    );
+  };
+
+  return links.reduce<MenuItem[]>((acc, link) => {
+    if (!link || typeof link !== 'object') {
+      return acc;
+    }
+
+    const candidate = link as Partial<MenuItem>;
+
+    if (
+      typeof candidate.to !== 'string' ||
+      !isValidIcon(candidate.icon) ||
+      typeof candidate.intlLabel?.id !== 'string' ||
+      typeof candidate.intlLabel.defaultMessage !== 'string'
+    ) {
+      return acc;
+    }
+
+    acc.push({
+      ...candidate,
+      permissions: Array.isArray(candidate.permissions) ? candidate.permissions : [],
+    } as MenuItem);
+
+    return acc;
+  }, []);
+};
+
+export { useMenu, getGeneralLinks, normalizeMenuLinks };

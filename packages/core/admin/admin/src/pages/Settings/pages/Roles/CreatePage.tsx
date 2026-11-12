@@ -3,37 +3,31 @@ import * as React from 'react';
 import {
   Box,
   Button,
-  ContentLayout,
+  Field,
   Flex,
   Grid,
-  GridItem,
-  HeaderLayout,
   Main,
   Textarea,
   TextInput,
   Typography,
 } from '@strapi/design-system';
-import { Link } from '@strapi/design-system/v2';
-import {
-  CheckPagePermissions,
-  Form,
-  LoadingIndicatorPage,
-  SettingsPageTitle,
-  useNotification,
-  useOverlayBlocker,
-  useTracking,
-  translatedErrors,
-  useAPIErrorHandler,
-} from '@strapi/helper-plugin';
-import { ArrowLeft } from '@strapi/icons';
+import { Check } from '@strapi/icons';
 import { format } from 'date-fns';
-import { Formik, FormikHelpers } from 'formik';
+import { Formik, Form, FormikHelpers } from 'formik';
 import { useIntl } from 'react-intl';
-import { NavLink, useHistory, useRouteMatch } from 'react-router-dom';
-import styled from 'styled-components';
+import { useNavigate, useParams } from 'react-router-dom';
+import { styled } from 'styled-components';
 import * as yup from 'yup';
 
+import { SUPER_ADMIN_CODE } from '../../../../../../shared/utils/super-admin';
+import { Layouts } from '../../../../components/Layouts/Layout';
+import { Page } from '../../../../components/PageHelpers';
 import { useTypedSelector } from '../../../../core/store/hooks';
+import { useAuth } from '../../../../features/Auth';
+import { BackButton } from '../../../../features/BackButton';
+import { useNotification } from '../../../../features/Notifications';
+import { useTracking } from '../../../../features/Tracking';
+import { useAPIErrorHandler } from '../../../../hooks/useAPIErrorHandler';
 import {
   useCreateRoleMutation,
   useGetRolePermissionLayoutQuery,
@@ -41,16 +35,19 @@ import {
   useUpdateRolePermissionsMutation,
 } from '../../../../services/users';
 import { isBaseQueryError } from '../../../../utils/baseQuery';
+import { translatedErrors } from '../../../../utils/translatedErrors';
 
 import { Permissions, PermissionsAPI } from './components/Permissions';
+import { isPermissionWithinCeiling, toEnforcedPermissions } from './utils/createPermissionChecker';
+import { isPermissionsCeilingError } from './utils/isPermissionsCeilingError';
 
 /* -------------------------------------------------------------------------------------------------
  * CreatePage
  * -----------------------------------------------------------------------------------------------*/
 
 const CREATE_SCHEMA = yup.object().shape({
-  name: yup.string().required(translatedErrors.required),
-  description: yup.string().required(translatedErrors.required),
+  name: yup.string().required(translatedErrors.required.id),
+  description: yup.string().required(translatedErrors.required.id),
 });
 
 /**
@@ -66,21 +63,29 @@ interface CreateRoleFormValues {
  * manage the state of the child is nonsensical.
  */
 const CreatePage = () => {
-  const match = useRouteMatch<{ id: string }>('/settings/roles/duplicate/:id');
-  const toggleNotification = useNotification();
-  const { lockApp, unlockApp } = useOverlayBlocker();
+  const { id } = useParams();
+  const { toggleNotification } = useNotification();
   const { formatMessage } = useIntl();
-  const { replace } = useHistory();
+  const navigate = useNavigate();
   const permissionsRef = React.useRef<PermissionsAPI>(null);
+  const [hasLocaleValidationErrors, setHasLocaleValidationErrors] = React.useState(false);
   const { trackUsage } = useTracking();
   const {
     _unstableFormatAPIError: formatAPIError,
     _unstableFormatValidationErrors: formatValidationErrors,
   } = useAPIErrorHandler();
 
-  const id = match?.params.id ?? null;
+  /**
+   * An admin cannot grant a permission they do not hold themselves, so the permissions
+   * tree is restricted to the current user's own permissions unless they are a super admin.
+   */
+  const currentUserPermissions = useAuth('CreatePage', (state) => state.permissions);
+  const currentUser = useAuth('CreatePage', (state) => state.user);
+  const isCurrentUserSuperAdmin =
+    currentUser?.roles.some((role) => role.code === SUPER_ADMIN_CODE) ?? false;
+  const userPermissions = isCurrentUserSuperAdmin ? undefined : currentUserPermissions;
 
-  const { isLoading: isLoadingPermissionsLayout, data: permissionsLayout } =
+  const { isLoading: isLoadingPermissionsLayout, currentData: permissionsLayout } =
     useGetRolePermissionLayoutQuery({
       /**
        * Role here is a query param so if there's no role we pass an empty string
@@ -93,7 +98,7 @@ const CreatePage = () => {
    * We need this so if we're cloning a role, we can fetch
    * the current permissions that role has.
    */
-  const { data: rolePermissions, isLoading: isLoadingRole } = useGetRolePermissionsQuery(
+  const { currentData: rolePermissions, isLoading: isLoadingRole } = useGetRolePermissionsQuery(
     {
       id: id!,
     },
@@ -103,6 +108,28 @@ const CreatePage = () => {
     }
   );
 
+  /**
+   * A duplicated role can only carry what the user may grant: the new role has no permissions
+   * yet, so nothing is exempt from the ceiling, and the server rejects the whole update when one
+   * copied permission is outside it. Permissions outside it are left unticked.
+   */
+  const permissionsToCopy = React.useMemo(() => {
+    if (userPermissions === undefined) {
+      return rolePermissions;
+    }
+
+    // The form is not shown before the layout loads
+    if (permissionsLayout === undefined) {
+      return undefined;
+    }
+
+    const heldPermissions = toEnforcedPermissions(userPermissions, permissionsLayout);
+
+    return rolePermissions?.filter((permission) =>
+      isPermissionWithinCeiling(heldPermissions, permission)
+    );
+  }, [permissionsLayout, rolePermissions, userPermissions]);
+
   const [createRole] = useCreateRoleMutation();
   const [updateRolePermissions] = useUpdateRolePermissionsMutation();
 
@@ -110,10 +137,12 @@ const CreatePage = () => {
     data: CreateRoleFormValues,
     formik: FormikHelpers<CreateRoleFormValues>
   ) => {
-    try {
-      // @ts-expect-error – fixed in V5
-      lockApp();
+    // Re-check via ref on submit: state may lag behind the latest matrix edits when save is clicked quickly
+    if (permissionsRef.current?.hasLocaleValidationErrors()) {
+      return;
+    }
 
+    try {
       if (id) {
         trackUsage('willDuplicateRole');
       } else {
@@ -127,7 +156,7 @@ const CreatePage = () => {
           formik.setErrors(formatValidationErrors(res.error));
         } else {
           toggleNotification({
-            type: 'warning',
+            type: 'danger',
             message: formatAPIError(res.error),
           });
         }
@@ -148,8 +177,14 @@ const CreatePage = () => {
             formik.setErrors(formatValidationErrors(updateRes.error));
           } else {
             toggleNotification({
-              type: 'warning',
-              message: formatAPIError(updateRes.error),
+              type: 'danger',
+              message: isPermissionsCeilingError(updateRes.error)
+                ? formatMessage({
+                    id: 'Settings.permissions.cannot-grant-unheld.error',
+                    defaultMessage:
+                      "Some permissions could not be saved because you don't have them yourself.",
+                  })
+                : formatAPIError(updateRes.error),
             });
           }
 
@@ -159,24 +194,33 @@ const CreatePage = () => {
 
       toggleNotification({
         type: 'success',
-        message: { id: 'Settings.roles.created', defaultMessage: 'created' },
+        message: formatMessage({ id: 'Settings.roles.created', defaultMessage: 'created' }),
       });
 
-      replace(`/settings/roles/${res.data.id}`);
-    } catch (err) {
+      navigate(`../roles/${res.data.id.toString()}`, { replace: true });
+    } catch {
       toggleNotification({
-        type: 'warning',
-        message: { id: 'notification.error' },
+        type: 'danger',
+        message: formatMessage({ id: 'notification.error', defaultMessage: 'An error occurred' }),
       });
-    } finally {
-      // @ts-expect-error – fixed in V5
-      unlockApp();
     }
   };
 
+  // The permissions form reads its initial permissions once, when it mounts
+  if (isLoadingPermissionsLayout || isLoadingRole || !permissionsLayout) {
+    return <Page.Loading />;
+  }
+
   return (
     <Main>
-      <SettingsPageTitle name="Roles" />
+      <Page.Title>
+        {formatMessage(
+          { id: 'Settings.PageTitle', defaultMessage: 'Settings - {name}' },
+          {
+            name: 'Roles',
+          }
+        )}
+      </Page.Title>
       <Formik
         initialValues={
           {
@@ -194,23 +238,29 @@ const CreatePage = () => {
         {({ values, errors, handleReset, handleChange, isSubmitting }) => (
           <Form>
             <>
-              <HeaderLayout
+              <Layouts.Header
                 primaryAction={
-                  <Flex gap={2}>
+                  <Flex width="100%" gap={2}>
                     <Button
                       variant="secondary"
                       onClick={() => {
                         handleReset();
                         permissionsRef.current?.resetForm();
                       }}
-                      size="L"
+                      fullWidth
                     >
                       {formatMessage({
                         id: 'app.components.Button.reset',
                         defaultMessage: 'Reset',
                       })}
                     </Button>
-                    <Button type="submit" loading={isSubmitting} size="L">
+                    <Button
+                      type="submit"
+                      loading={isSubmitting}
+                      disabled={hasLocaleValidationErrors}
+                      startIcon={<Check />}
+                      fullWidth
+                    >
                       {formatMessage({
                         id: 'global.save',
                         defaultMessage: 'Save',
@@ -227,16 +277,13 @@ const CreatePage = () => {
                   defaultMessage: 'Define the rights given to the role',
                 })}
                 navigationAction={
-                  // @ts-expect-error – the props from the component passed as `as` are not correctly inferred.
-                  <Link as={NavLink} startIcon={<ArrowLeft />} to="/settings/roles">
-                    {formatMessage({
-                      id: 'global.back',
-                      defaultMessage: 'Back',
-                    })}
-                  </Link>
+                  // The back link for mobile works differently; it is placed higher up in the DOM.
+                  <Box display={{ initial: 'none', medium: 'block' }}>
+                    <BackButton fallback="../roles" />
+                  </Box>
                 }
               />
-              <ContentLayout>
+              <Layouts.Content>
                 <Flex direction="column" alignItems="stretch" gap={6}>
                   <Box background="neutral0" padding={6} shadow="filterShadow" hasRadius>
                     <Flex direction="column" alignItems="stretch" gap={4}>
@@ -270,52 +317,52 @@ const CreatePage = () => {
                           )}
                         </UsersRoleNumber>
                       </Flex>
-                      <Grid gap={4}>
-                        <GridItem col={6}>
-                          <TextInput
+                      <Grid.Root gap={4}>
+                        <Grid.Item m={6} xs={12} direction="column" alignItems="stretch">
+                          <Field.Root
                             name="name"
                             error={errors.name && formatMessage({ id: errors.name })}
-                            label={formatMessage({
-                              id: 'global.name',
-                              defaultMessage: 'Name',
-                            })}
-                            onChange={handleChange}
                             required
-                            value={values.name}
-                          />
-                        </GridItem>
-                        <GridItem col={6}>
-                          <Textarea
-                            label={formatMessage({
-                              id: 'global.description',
-                              defaultMessage: 'Description',
-                            })}
-                            id="description"
-                            error={errors.description && formatMessage({ id: errors.description })}
-                            onChange={handleChange}
                           >
-                            {values.description}
-                          </Textarea>
-                        </GridItem>
-                      </Grid>
+                            <Field.Label>
+                              {formatMessage({
+                                id: 'global.name',
+                                defaultMessage: 'Name',
+                              })}
+                            </Field.Label>
+                            <TextInput type="text" onChange={handleChange} value={values.name} />
+                            <Field.Error />
+                          </Field.Root>
+                        </Grid.Item>
+                        <Grid.Item m={6} xs={12} direction="column" alignItems="stretch">
+                          <Field.Root
+                            name="description"
+                            error={errors.description && formatMessage({ id: errors.description })}
+                          >
+                            <Field.Label>
+                              {formatMessage({
+                                id: 'global.description',
+                                defaultMessage: 'Description',
+                              })}
+                            </Field.Label>
+                            <Textarea onChange={handleChange} value={values.description} />
+                          </Field.Root>
+                        </Grid.Item>
+                      </Grid.Root>
                     </Flex>
                   </Box>
-                  {!isLoadingPermissionsLayout && !isLoadingRole && permissionsLayout ? (
-                    <Box shadow="filterShadow" hasRadius>
-                      <Permissions
-                        isFormDisabled={false}
-                        ref={permissionsRef}
-                        permissions={rolePermissions}
-                        layout={permissionsLayout}
-                      />
-                    </Box>
-                  ) : (
-                    <Box background="neutral0" padding={6} shadow="filterShadow" hasRadius>
-                      <LoadingIndicatorPage />
-                    </Box>
-                  )}
+                  <Box shadow="filterShadow" hasRadius>
+                    <Permissions
+                      isFormDisabled={false}
+                      onLocaleValidationChange={setHasLocaleValidationErrors}
+                      ref={permissionsRef}
+                      permissions={permissionsToCopy}
+                      layout={permissionsLayout}
+                      userPermissions={userPermissions}
+                    />
+                  </Box>
                 </Flex>
-              </ContentLayout>
+              </Layouts.Content>
             </>
           </Form>
         )}
@@ -330,7 +377,7 @@ const UsersRoleNumber = styled.div`
   padding: ${({ theme }) => `${theme.spaces[2]} ${theme.spaces[4]}`};
   color: ${({ theme }) => theme.colors.primary600};
   border-radius: ${({ theme }) => theme.borderRadius};
-  font-size: ${12 / 16}rem;
+  font-size: 1.2rem;
   font-weight: bold;
 `;
 
@@ -344,9 +391,9 @@ const ProtectedCreatePage = () => {
   );
 
   return (
-    <CheckPagePermissions permissions={permissions}>
+    <Page.Protect permissions={permissions}>
       <CreatePage />
-    </CheckPagePermissions>
+    </Page.Protect>
   );
 };
 

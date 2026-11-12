@@ -72,7 +72,8 @@ describe('Migration - draft and publish', () => {
     });
 
     describe('Enabling D&P on a content-type', () => {
-      test('No publishedAt before enabling the feature', async () => {
+      // Disabled D&P always have publishedAt attribute set to a date
+      test('Published at set before enabling the feature', async () => {
         const { body } = await rq({
           url: '/content-manager/collection-types/api::dog.dog',
           method: 'GET',
@@ -84,11 +85,11 @@ describe('Migration - draft and publish', () => {
 
         sortedBody.forEach((dog, index) => {
           expect(dog).toMatchObject(data.dogs[index]);
-          expect(dog.publishedAt).toBeUndefined();
+          expect(dog.publishedAt).toBeISODate();
         });
       });
 
-      test('Published_at is equal to created_at after enabling the feature', async () => {
+      test('Draft versions are created after enabling the feature', async () => {
         const schema = await modelsUtils.getContentTypeSchema(dogModel.singularName, { strapi });
 
         await modelsUtils.modifyContentType(
@@ -102,30 +103,34 @@ describe('Migration - draft and publish', () => {
 
         await restart();
 
-        const { body } = await rq({
-          method: 'GET',
-          url: '/content-manager/collection-types/api::dog.dog',
+        const dogs = await strapi.db.query('api::dog.dog').findMany();
+
+        // 2 published + 2 drafts
+        expect(dogs.length).toBe(4);
+
+        // Compare published and draft versions
+        const dogsByDocumentId = _.groupBy(dogs, 'documentId');
+        Object.values(dogsByDocumentId).forEach((versions) => {
+          expect(versions.length).toBe(2);
+
+          const publishedDog = versions.find((dog) => dog.publishedAt);
+          const draftDog = versions.find((dog) => !dog.publishedAt);
+
+          // Published dog should have a publishedAt value
+          expect(draftDog.publishedAt).toBe(null);
+          // Updated at value should be the same
+          expect(draftDog.updatedAt).toBe(publishedDog.updatedAt);
         });
 
-        expect(body.results.length).toBe(2);
-
-        const sortedBody = sortDogs(body.results);
-
-        sortedBody.forEach((dog, index) => {
-          expect(dog).toMatchObject(data.dogs[index]);
-          expect(dog.publishedAt).toBe(dog.createdAt || dog.created_at);
-          expect(!Number.isNaN(new Date(dog.publishedAt).valueOf())).toBe(true);
-        });
-
-        data.dogs = sortedBody;
+        data.dogs = sortDogs(dogs.filter((dog) => dog.publishedAt));
       });
     });
 
     describe('Disabling D&P on a content-type', () => {
-      test('No publishedAt after disabling the feature + draft removed', async () => {
+      test('publishedAt after disabling the feature + draft removed', async () => {
         const res = await rq({
           method: 'POST',
-          url: `/content-manager/collection-types/api::dog.dog/${data.dogs[1].id}/actions/unpublish`,
+          url: `/content-manager/collection-types/api::dog.dog/${data.dogs[1].documentId}/actions/unpublish`,
         });
 
         data.dogs[1] = res.body;
@@ -153,7 +158,7 @@ describe('Migration - draft and publish', () => {
 
         expect(body.results.length).toBe(1);
         expect(body.results[0]).toMatchObject(_.pick(data.dogs[0], ['name']));
-        expect(body.results[0].publishedAt).toBeUndefined();
+        expect(body.results[0].publishedAt).toBeISODate();
       });
 
       test('Unique constraint is kept after disabling the feature', async () => {
@@ -165,8 +170,8 @@ describe('Migration - draft and publish', () => {
           body: dogToCreate,
         });
 
-        expect(res.statusCode).toBe(200);
-        expect(res.body).toMatchObject(dogToCreate);
+        expect(res.statusCode).toBe(201);
+        expect(res.body.data).toMatchObject(dogToCreate);
 
         data.dogs.push(res.body);
 

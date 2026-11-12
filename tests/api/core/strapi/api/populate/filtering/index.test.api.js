@@ -1,6 +1,6 @@
 'use strict';
 
-const { propEq, omit } = require('lodash/fp');
+const { matchesProperty, omit } = require('lodash');
 
 const { createTestBuilder } = require('api-tests/builder');
 const { createStrapiInstance } = require('api-tests/strapi');
@@ -19,6 +19,8 @@ const schemas = {
       attributes: {
         number: { type: 'integer' },
         field: { type: 'string' },
+        // NOTE: Test conflicting attribute names do not cause issues with populate object
+        filters: { type: 'json' },
       },
     },
     bar: {
@@ -26,6 +28,8 @@ const schemas = {
       attributes: {
         title: { type: 'string' },
         field: { type: 'password' },
+        // NOTE: Test conflicting attribute names do not cause issues with populate object
+        filters: { type: 'json' },
       },
     },
   },
@@ -40,6 +44,8 @@ const schemas = {
         pass: { type: 'password' },
         fooRef: { type: 'component', component: 'default.foo', repeatable: false },
         barRefs: { type: 'component', component: 'default.bar', repeatable: true },
+        // NOTE: Test conflicting attribute names do not cause issues with populate object
+        filters: { type: 'relation', relation: 'oneToOne', target: 'api::a.a' },
       },
     },
     b: {
@@ -196,8 +202,8 @@ describe('Populate filters', () => {
       expect(body.data).toHaveLength(fixtures.a.length);
 
       body.data.forEach((entity) => {
-        expect(entity.attributes).toHaveProperty('fooRef');
-        expect(entity.attributes).not.toHaveProperty('barRefs');
+        expect(entity).toHaveProperty('fooRef');
+        expect(entity).not.toHaveProperty('barRefs');
       });
     });
 
@@ -212,14 +218,14 @@ describe('Populate filters', () => {
       expect(body.data).toHaveLength(fixtures.a.length);
 
       body.data.forEach((entity) => {
-        expect(entity.attributes).toHaveProperty('fooRef');
-        expect(entity.attributes).toHaveProperty('barRefs');
+        expect(entity).toHaveProperty('fooRef');
+        expect(entity).toHaveProperty('barRefs');
       });
     });
 
     test('No filters & deep populate', async () => {
       const qs = {
-        populate: ['second', 'third.fooRef'],
+        populate: ['second', 'third.fooRef', 'third.filters'],
       };
       const { status, body } = await rq.get(`/${schemas.contentTypes.c.pluralName}`, { qs });
 
@@ -227,15 +233,15 @@ describe('Populate filters', () => {
       expect(body.data).toHaveLength(2);
 
       body.data.forEach((entity) => {
-        expect(entity.attributes).toHaveProperty('second');
-        expect(entity.attributes).toHaveProperty('third');
+        expect(entity).toHaveProperty('second');
+        expect(entity).toHaveProperty('third');
 
-        expect(Array.isArray(entity.attributes.third.data)).toBe(true);
+        expect(Array.isArray(entity.third)).toBe(true);
 
-        entity.attributes.third.data.forEach((thirdItem) => {
-          const expected = data.a.find(propEq('id', thirdItem.id));
+        entity.third.forEach((thirdItem) => {
+          const expected = data.a.find(matchesProperty('id', thirdItem.id));
 
-          expect(thirdItem.attributes).toMatchObject(omit('id', expected));
+          expect(thirdItem).toMatchObject(omit(expected, 'id'));
         });
       });
     });
@@ -259,10 +265,10 @@ describe('Populate filters', () => {
 
       const [firstItem, secondItem] = body.data;
 
-      expect(firstItem.attributes.second).toBeNull();
-      expect(secondItem.attributes.second).not.toBeNull();
+      expect(firstItem.second).toBeNull();
+      expect(secondItem.second).not.toBeNull();
 
-      expect(secondItem.attributes.second).toMatchObject({
+      expect(secondItem.second).toMatchObject({
         number: 14,
         field: 'a simple string',
       });
@@ -287,9 +293,9 @@ describe('Populate filters', () => {
 
       const [firstItem, secondItem] = body.data;
 
-      expect(firstItem.attributes.third.data[0].attributes.fooRef).not.toBeNull();
-      expect(secondItem.attributes.third.data[0].attributes.fooRef).not.toBeNull();
-      expect(secondItem.attributes.third.data[1].attributes.fooRef).toBeNull();
+      expect(firstItem.third[0].fooRef).not.toBeNull();
+      expect(secondItem.third[0].fooRef).not.toBeNull();
+      expect(secondItem.third[1].fooRef).toBeNull();
     });
 
     test("Populate with object and 't'", async () => {
@@ -303,7 +309,7 @@ describe('Populate filters', () => {
       expect(status).toBe(200);
       expect(body.data).toHaveLength(2);
 
-      expect(body.data[0].attributes.third.data[0].attributes.fooRef).toBeUndefined();
+      expect(body.data[0].third[0].fooRef).toBeUndefined();
     });
 
     test("Don't populate with object and 'f'", async () => {
@@ -317,7 +323,7 @@ describe('Populate filters', () => {
       expect(status).toBe(200);
       expect(body.data).toHaveLength(2);
 
-      expect(body.data[0].attributes.third).toBeUndefined();
+      expect(body.data[0].third).toBeUndefined();
     });
   });
 
@@ -325,7 +331,12 @@ describe('Populate filters', () => {
     test('Populate every component in the dynamic zone', async () => {
       const qs = {
         populate: {
-          dz: '*',
+          dz: {
+            on: {
+              'default.foo': true,
+              'default.bar': true,
+            },
+          },
         },
       };
 
@@ -336,12 +347,12 @@ describe('Populate filters', () => {
 
       fixtures.b.forEach((fixture, i) => {
         const res = body.data[i];
-        const { dz } = res.attributes;
+        const { dz } = res;
 
         expect(dz).toHaveLength(fixture.dz.length);
         expect(dz).toMatchObject(
           fixture.dz.map((component) => ({
-            ...omit('field', component),
+            ...omit(component, 'field'),
             id: expect.any(Number),
           }))
         );
@@ -364,8 +375,8 @@ describe('Populate filters', () => {
       expect(status).toBe(200);
       expect(body.data).toHaveLength(2);
 
-      expect(body.data[0].attributes.dz).toHaveLength(3);
-      expect(body.data[1].attributes.dz).toHaveLength(0);
+      expect(body.data[0].dz).toHaveLength(3);
+      expect(body.data[1].dz).toHaveLength(0);
 
       const expected = fixtures.b[0].dz
         .filter(({ __component }) => __component === 'default.foo')
@@ -374,7 +385,7 @@ describe('Populate filters', () => {
           id: expect.any(Number),
         }));
 
-      expect(body.data[0].attributes.dz).toMatchObject(expected);
+      expect(body.data[0].dz).toMatchObject(expected);
     });
 
     test('Populate the dynamic zone with filters in fragments', async () => {
@@ -397,8 +408,8 @@ describe('Populate filters', () => {
 
       expect(status).toBe(200);
       expect(body.data).toHaveLength(2);
-      expect(body.data[0].attributes.dz).toHaveLength(2);
-      expect(body.data[1].attributes.dz).toHaveLength(1);
+      expect(body.data[0].dz).toHaveLength(2);
+      expect(body.data[1].dz).toHaveLength(1);
 
       const filter = (data = []) =>
         data
@@ -408,12 +419,12 @@ describe('Populate filters', () => {
             return false;
           })
           .map((component) => ({
-            ...(component.__component === 'default.foo' ? component : omit('field', component)),
+            ...(component.__component === 'default.foo' ? component : omit(component, 'field')),
             id: expect.any(Number),
           }));
 
-      expect(body.data[0].attributes.dz).toMatchObject(filter(fixtures.b[0].dz));
-      expect(body.data[1].attributes.dz).toMatchObject(filter(fixtures.b[1].dz));
+      expect(body.data[0].dz).toMatchObject(filter(fixtures.b[0].dz));
+      expect(body.data[1].dz).toMatchObject(filter(fixtures.b[1].dz));
     });
   });
 });

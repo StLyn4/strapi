@@ -1,61 +1,61 @@
 import knex from 'knex';
 import type { Knex } from 'knex';
-import SqliteClient from 'knex/lib/dialects/sqlite3/index';
-
-class LegacySqliteClient extends SqliteClient {
-  _driver() {
-    /* eslint-disable-next-line import/no-extraneous-dependencies */
-    return require('sqlite3');
-  }
-}
 
 const clientMap = {
-  'better-sqlite3': 'better-sqlite3',
-  '@vscode/sqlite3': 'sqlite',
-  sqlite3: LegacySqliteClient,
-} as const;
-
-type ClientKey = keyof typeof clientMap;
-
-const trySqlitePackage = (packageName: ClientKey): ClientKey | false => {
-  try {
-    require.resolve(packageName);
-    return packageName;
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'MODULE_NOT_FOUND') {
-      return false;
-    }
-    throw error;
-  }
+  sqlite: 'better-sqlite3',
+  mysql: 'mysql2',
+  postgres: 'pg',
 };
 
-const getSqlitePackageName = (): ClientKey => {
-  // NOTE: allow forcing the package to use (mostly used for testing purposes)
-  if (typeof process.env.SQLITE_PKG !== 'undefined') {
-    return process.env.SQLITE_PKG as ClientKey;
+type ClientKind = keyof typeof clientMap;
+
+export function isDatabaseClientKind(client: unknown): client is ClientKind {
+  return (client as string) in clientMap;
+}
+
+export const createConnection = (userConfig: Knex.Config, strapiConfig?: Partial<Knex.Config>) => {
+  if (!isDatabaseClientKind(userConfig.client)) {
+    throw new Error(`Unsupported database client ${userConfig.client}`);
   }
 
-  // NOTE: this tries to find the best sqlite module possible to use
-  // while keeping retro compatibility
-  const matchingPackage: ClientKey | false =
-    trySqlitePackage('better-sqlite3') ||
-    trySqlitePackage('@vscode/sqlite3') ||
-    trySqlitePackage('sqlite3');
+  const knexConfig: Knex.Config = { ...userConfig, client: clientMap[userConfig.client] };
 
-  if (!matchingPackage) {
-    throw new Error('No sqlite package found');
+  // initialization code to run upon opening a new connection
+  if (strapiConfig?.pool?.afterCreate) {
+    // copy so the wrapper below is not written into the caller's pool config (shared with strapi.config)
+    knexConfig.pool = { ...knexConfig.pool };
+    // if the user has set their own afterCreate in config, we will replace it and call it
+    const userAfterCreate = knexConfig.pool?.afterCreate;
+    const strapiAfterCreate = strapiConfig.pool.afterCreate;
+    knexConfig.pool.afterCreate = (
+      conn: unknown,
+      done: (err: Error | null | undefined, connection: any) => void
+    ) => {
+      strapiAfterCreate(conn, (err: Error | null | undefined, nativeConn: any) => {
+        if (err) {
+          return done(err, nativeConn);
+        }
+        if (userAfterCreate) {
+          return userAfterCreate(nativeConn, done);
+        }
+        return done(null, nativeConn);
+      });
+    };
   }
 
-  return matchingPackage;
-};
+  const instance = knex(knexConfig);
 
-export const createConnection = (config: Knex.Config) => {
-  const knexConfig = { ...config };
-  if (knexConfig.client === 'sqlite') {
-    const sqlitePackageName = getSqlitePackageName();
-
-    knexConfig.client = clientMap[sqlitePackageName] as Knex.Config['client'];
+  // knex up to 3.2.6 made `password` non-enumerable on the connection object it was given, which
+  // is the live config object, so it stayed out of JSON.stringify and Object.keys. 3.2.7 clones the
+  // config instead and hides it on the clone only, so do it here. The value is unchanged.
+  const connection = userConfig.connection;
+  if (
+    typeof connection === 'object' &&
+    connection !== null &&
+    Object.prototype.hasOwnProperty.call(connection, 'password')
+  ) {
+    Object.defineProperty(connection, 'password', { enumerable: false });
   }
 
-  return knex(knexConfig);
+  return instance;
 };

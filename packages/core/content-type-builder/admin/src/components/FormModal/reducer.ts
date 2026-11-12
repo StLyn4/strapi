@@ -1,4 +1,4 @@
-import produce from 'immer';
+import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import set from 'lodash/set';
 import snakeCase from 'lodash/snakeCase';
 import pluralize from 'pluralize';
@@ -6,333 +6,505 @@ import pluralize from 'pluralize';
 import { getRelationType } from '../../utils/getRelationType';
 import { nameToSlug } from '../../utils/nameToSlug';
 
-import * as actions from './constants';
 import { createComponentUid } from './utils/createUid';
 import { customFieldDefaultOptionsReducer } from './utils/customFieldDefaultOptionsReducer';
 import { shouldPluralizeName, shouldPluralizeTargetAttribute } from './utils/relations';
 
-import type { AnyAction } from '@reduxjs/toolkit';
+import type { FolderSelection } from '../DataManager/utils/contentStructure';
+import type { Schema, Struct, UID } from '@strapi/types';
+import type { MessageDescriptor, PrimitiveType } from 'react-intl';
 
-const initialState: any = {
+type FormModalError = MessageDescriptor & {
+  values?: Record<string, PrimitiveType>;
+};
+
+export type ComponentToCreateData = Record<string, unknown> & {
+  type?: 'component';
+  displayName?: string;
+  icon?: string;
+  category?: string;
+};
+
+export type FormModalData = Record<string, unknown> & {
+  allowedTypes?: string[];
+  category?: string;
+  component?: UID.Component;
+  components?: UID.Component[];
+  componentToCreate?: ComponentToCreateData;
+  conditions?: unknown;
+  createComponent?: boolean;
+  default?: unknown;
+  displayName?: string;
+  draftAndPublish?: boolean;
+  enum?: string[];
+  folder?: FolderSelection;
+  icon?: string;
+  kind?: Struct.ContentTypeKind;
+  multiple?: boolean;
+  name?: string;
+  options?: object;
+  pluralName?: string;
+  pluginOptions?: object;
+  relation?: Schema.Attribute.RelationKind.Any;
+  repeatable?: boolean;
+  required?: boolean;
+  singularName?: string;
+  target?: string | null;
+  targetAttribute?: string | null;
+  type?: string;
+};
+
+type CustomFieldOption = {
+  items?: CustomFieldOption[];
+  name?: string;
+  defaultValue?: unknown;
+};
+
+type CustomField = {
+  type: string;
+  options?: {
+    base?: CustomFieldOption[];
+    advanced?: CustomFieldOption[];
+  };
+};
+
+export type State = {
+  formErrors: Record<string, FormModalError>;
+  modifiedData: FormModalData;
+  initialData: FormModalData;
+  /**
+   * `modifiedData` as the form seeded it, before the user typed anything. Compare against this
+   * (not `initialData`) to tell whether the form has unsaved changes: create flows seed
+   * `modifiedData` with type defaults while `initialData` stays `{}`, and `initialData` must stay
+   * that way because rename handling (`getRenameStorageChange`) reads it.
+   */
+  pristineData: FormModalData;
+  componentToCreate: ComponentToCreateData;
+  isCreatingComponentWhileAddingAField: boolean;
+};
+
+const initialState: State = {
   formErrors: {},
   modifiedData: {},
   initialData: {},
+  pristineData: {},
   componentToCreate: {},
   isCreatingComponentWhileAddingAField: false,
 };
 
-const reducer = (state = initialState, action: AnyAction) =>
-  // eslint-disable-next-line consistent-return
-  produce(state, (draftState: any) => {
-    switch (action.type) {
-      case actions.ON_CHANGE: {
-        const { keys, value } = action;
-        const obj = state.modifiedData;
-        const hasDefaultValue = Boolean(obj.default);
+type OnChangePayload = {
+  keys: string[];
+  value: unknown;
+};
 
-        // There is no need to remove the default key if the default value isn't defined
-        if (hasDefaultValue && keys.length === 1 && keys.includes('type')) {
-          const previousType = obj.type;
+type OnChangeRelationTargetPayload = {
+  target: {
+    oneThatIsCreatingARelationWithAnother: string;
+    selectedContentTypeFriendlyName: string;
+    targetContentTypeAllowedRelations: Schema.Attribute.RelationKind.Any[] | null;
+    value: string;
+  };
+};
 
-          if (previousType && ['date', 'datetime', 'time'].includes(previousType)) {
-            // return obj.updateIn(keys, () => value).remove('default');
-            delete draftState.modifiedData.default;
-          }
+type OnChangeRelationTypePayload = {
+  target: {
+    oneThatIsCreatingARelationWithAnother: string;
+    value: Schema.Attribute.RelationKind.Any;
+  };
+};
+
+type ResetPropsAndSetFormForAddingAnExistingCompoPayload = {
+  uid: UID.Schema;
+  options?: Record<string, unknown>;
+};
+
+type ResetPropsAndSaveCurrentDataPayload = {
+  uid: UID.Schema;
+  options?: Record<string, unknown>;
+};
+
+type SetDataToEditPayload = {
+  data: FormModalData;
+};
+
+type SetAttributeDataSchemaPayload =
+  | {
+      isEditing: true;
+      modifiedDataToSetForEditing: FormModalData;
+      uid: UID.Schema;
+    }
+  | {
+      isEditing: false;
+      modifiedDataToSetForEditing: FormModalData;
+      attributeType: string;
+      nameToSetForRelation: string;
+      targetUid: string;
+      step: string | null;
+      options?: Record<string, unknown>;
+      uid: UID.Schema;
+    };
+
+type SetCustomFieldDataSchemaPayload =
+  | {
+      isEditing: true;
+      modifiedDataToSetForEditing: FormModalData;
+      uid: UID.Schema;
+    }
+  | {
+      isEditing: false;
+      modifiedDataToSetForEditing: FormModalData;
+      customField: CustomField;
+      options?: Record<string, unknown>;
+      uid: UID.Schema;
+    };
+
+type SetDynamicZoneDataSchemaPayload = {
+  attributeToEdit: FormModalData;
+};
+
+type SetErrorsPayload = {
+  errors: Record<string, FormModalError>;
+};
+
+const slice = createSlice({
+  name: 'formModal',
+  initialState,
+  reducers: {
+    onChange: (state, action: PayloadAction<OnChangePayload>) => {
+      const { keys, value } = action.payload;
+      const obj = state.modifiedData;
+      const hasDefaultValue = obj.default !== undefined;
+
+      // There is no need to remove the default key if the default value isn't defined
+      if (hasDefaultValue && keys.length === 1 && keys.includes('type')) {
+        const previousType = obj.type;
+
+        if (previousType !== undefined && ['date', 'datetime', 'time'].includes(previousType)) {
+          // return obj.updateIn(keys, () => value).remove('default');
+          delete state.modifiedData.default;
         }
-
-        set(draftState, ['modifiedData', ...keys], value);
-
-        break;
       }
-      case actions.ON_CHANGE_RELATION_TARGET: {
-        const {
-          target: {
-            oneThatIsCreatingARelationWithAnother,
-            selectedContentTypeFriendlyName,
-            targetContentTypeAllowedRelations,
-            value,
-          },
-        } = action;
-        // Special case for the admin user...
-        let didChangeRelationTypeBecauseOfRestrictedRelation = false;
-        let changedRelationType = null;
 
-        set(draftState, ['modifiedData', 'target'], value);
-
-        const modifiedData = state.modifiedData;
-
-        // Don't change the relation type if the allowed relations are not restricted
-        // TODO: replace with an obj { relation: 'x', bidirctional: true|false } when BE ready
-        if (Array.isArray(targetContentTypeAllowedRelations)) {
-          const currentRelationType = getRelationType(
-            modifiedData.relation,
-            modifiedData.targetAttribute
-          );
-
-          if (!targetContentTypeAllowedRelations.includes(currentRelationType)) {
-            const relationToSet = targetContentTypeAllowedRelations[0];
-            didChangeRelationTypeBecauseOfRestrictedRelation = true;
-            changedRelationType = relationToSet;
-
-            if (relationToSet === 'oneWay') {
-              set(draftState, ['modifiedData', 'relation'], 'oneToOne');
-            } else if (relationToSet === 'manyWay') {
-              set(draftState, ['modifiedData', 'relation'], 'oneToMany');
-            } else {
-              set(draftState, ['modifiedData', 'relation'], relationToSet);
-            }
-          }
+      // If the user changes the content type kind (single vs. collecton), the folder selection becomes stale and should be deleted from the pending action.
+      if (keys.length === 1 && keys.includes('kind') && value !== obj.kind) {
+        if (obj.folder && 'targetGroupId' in obj.folder) {
+          delete state.modifiedData.folder;
         }
+      }
 
-        let nameToSet;
+      set(state, ['modifiedData', ...keys], value);
+    },
+    onChangeRelationTarget: (state, action: PayloadAction<OnChangeRelationTargetPayload>) => {
+      const {
+        target: {
+          oneThatIsCreatingARelationWithAnother,
+          selectedContentTypeFriendlyName,
+          targetContentTypeAllowedRelations,
+          value,
+        },
+      } = action.payload;
+      // Special case for the admin user...
+      let didChangeRelationTypeBecauseOfRestrictedRelation = false;
+      let changedRelationType: Schema.Attribute.RelationKind.Any | null = null;
 
-        if (didChangeRelationTypeBecauseOfRestrictedRelation) {
-          nameToSet = pluralize(
-            snakeCase(nameToSlug(selectedContentTypeFriendlyName)),
-            shouldPluralizeName(changedRelationType)
-          );
-        } else {
-          nameToSet = pluralize(
-            snakeCase(nameToSlug(selectedContentTypeFriendlyName)),
+      set(state, ['modifiedData', 'target'], value);
 
-            shouldPluralizeName(modifiedData.relation)
-          );
-        }
+      const modifiedData = state.modifiedData;
 
-        set(draftState, ['modifiedData', 'name'], nameToSet);
-
-        const currentTargetAttribute = state.modifiedData.targetAttribute;
-
-        if (currentTargetAttribute === null) {
-          break;
-        }
-
-        // Changing the target and the relation is either oneWay or manyWay
-        // Case when we need to change the relation to oneWay (ex: admin user)
-        if (
-          didChangeRelationTypeBecauseOfRestrictedRelation &&
-          ['oneWay', 'manyWay'].includes(changedRelationType)
-        ) {
-          set(draftState, ['modifiedData', 'targetAttribute'], null);
-
-          break;
-        }
-
-        const targetAttributeToSet = pluralize(
-          snakeCase(nameToSlug(oneThatIsCreatingARelationWithAnother)),
-          shouldPluralizeTargetAttribute(modifiedData.relation)
+      // Don't change the relation type if the allowed relations are not restricted
+      // TODO: replace with an obj { relation: 'x', bidirctional: true|false } when BE ready
+      if (Array.isArray(targetContentTypeAllowedRelations)) {
+        const currentRelationType = getRelationType(
+          modifiedData.relation,
+          modifiedData.targetAttribute
         );
 
-        set(draftState, ['modifiedData', 'targetAttribute'], targetAttributeToSet);
+        if (
+          currentRelationType &&
+          !targetContentTypeAllowedRelations.includes(currentRelationType)
+        ) {
+          const relationToSet = targetContentTypeAllowedRelations[0];
+          didChangeRelationTypeBecauseOfRestrictedRelation = true;
+          changedRelationType = relationToSet;
 
-        break;
-      }
-      case actions.ON_CHANGE_RELATION_TYPE: {
-        const {
-          target: { oneThatIsCreatingARelationWithAnother, value },
-        } = action;
-
-        const currentName = state.modifiedData.name;
-
-        // Switching from oneWay
-        if (!['oneWay', 'manyWay'].includes(value)) {
-          set(draftState, ['modifiedData', 'relation'], value);
-          const currentTargetAttribute = state.modifiedData.targetAttribute;
-
-          set(
-            draftState,
-            ['modifiedData', 'name'],
-            pluralize(snakeCase(nameToSlug(currentName)), shouldPluralizeName(value))
-          );
-
-          set(
-            draftState,
-            ['modifiedData', 'targetAttribute'],
-            pluralize(
-              currentTargetAttribute ||
-                snakeCase(nameToSlug(oneThatIsCreatingARelationWithAnother)),
-              shouldPluralizeTargetAttribute(value)
-            )
-          );
-
-          break;
-        }
-
-        if (value === 'oneWay') {
-          set(draftState, ['modifiedData', 'relation'], 'oneToOne');
-          set(draftState, ['modifiedData', 'targetAttribute'], null);
-          set(draftState, ['modifiedData', 'name'], pluralize(snakeCase(currentName), 1));
-
-          break;
-        }
-
-        // manyWay
-        set(draftState, ['modifiedData', 'relation'], 'oneToMany');
-        set(draftState, ['modifiedData', 'targetAttribute'], null);
-        set(draftState, ['modifiedData', 'name'], pluralize(snakeCase(currentName), 2));
-
-        break;
-      }
-
-      case actions.RESET_PROPS:
-        return initialState;
-      case actions.RESET_PROPS_AND_SET_FORM_FOR_ADDING_AN_EXISTING_COMPO: {
-        // This is run when the user doesn't want to create a new component
-
-        const nextState = {
-          ...initialState,
-          modifiedData: {
-            type: 'component',
-            repeatable: true,
-            ...action.options,
-          },
-        };
-
-        return nextState;
-      }
-      case actions.RESET_PROPS_AND_SAVE_CURRENT_DATA: {
-        // This is run when the user has created a new component
-        const componentToCreate = state.modifiedData.componentToCreate;
-        const modifiedData = {
-          displayName: componentToCreate.displayName,
-          type: 'component',
-          repeatable: false,
-          ...action.options,
-          component: createComponentUid(componentToCreate.displayName, componentToCreate.category),
-        };
-
-        const nextState = {
-          ...initialState,
-          componentToCreate,
-          modifiedData,
-          isCreatingComponentWhileAddingAField: state.modifiedData.createComponent,
-        };
-
-        return nextState;
-      }
-      case actions.RESET_PROPS_AND_SET_THE_FORM_FOR_ADDING_A_COMPO_TO_A_DZ: {
-        const createdDZ = state.modifiedData;
-        const dataToSet = {
-          ...createdDZ,
-          createComponent: true,
-          componentToCreate: { type: 'component' },
-        };
-
-        return { ...initialState, modifiedData: dataToSet };
-      }
-      case actions.SET_DATA_TO_EDIT: {
-        draftState.modifiedData = action.data;
-        draftState.initialData = action.data;
-        break;
-      }
-      case actions.SET_ATTRIBUTE_DATA_SCHEMA: {
-        const {
-          attributeType,
-          isEditing,
-          modifiedDataToSetForEditing,
-          nameToSetForRelation,
-          targetUid,
-          step,
-          options = {},
-        } = action;
-
-        if (isEditing) {
-          draftState.modifiedData = modifiedDataToSetForEditing;
-          draftState.initialData = modifiedDataToSetForEditing;
-
-          break;
-        }
-
-        let dataToSet;
-
-        if (attributeType === 'component') {
-          if (step === '1') {
-            dataToSet = {
-              type: 'component',
-              createComponent: true,
-              componentToCreate: { type: 'component' },
-            };
+          if (relationToSet === 'oneWay') {
+            set(state, ['modifiedData', 'relation'], 'oneToOne');
+          } else if (relationToSet === 'manyWay') {
+            set(state, ['modifiedData', 'relation'], 'oneToMany');
           } else {
-            dataToSet = {
-              ...options,
-              type: 'component',
-              repeatable: true,
-            };
+            set(state, ['modifiedData', 'relation'], relationToSet);
           }
-        } else if (attributeType === 'dynamiczone') {
+        }
+      }
+
+      let nameToSet: string;
+
+      if (didChangeRelationTypeBecauseOfRestrictedRelation && changedRelationType !== null) {
+        nameToSet = pluralize(
+          snakeCase(nameToSlug(selectedContentTypeFriendlyName)),
+          shouldPluralizeName(changedRelationType)
+        );
+      } else {
+        nameToSet = pluralize(
+          snakeCase(nameToSlug(selectedContentTypeFriendlyName)),
+
+          shouldPluralizeName(modifiedData.relation)
+        );
+      }
+
+      set(state, ['modifiedData', 'name'], nameToSet);
+
+      const currentTargetAttribute = state.modifiedData.targetAttribute;
+
+      if (currentTargetAttribute === null) {
+        return;
+      }
+
+      // Changing the target and the relation is either oneWay or manyWay
+      // Case when we need to change the relation to oneWay (ex: admin user)
+      if (
+        didChangeRelationTypeBecauseOfRestrictedRelation &&
+        changedRelationType !== null &&
+        ['oneWay', 'manyWay'].includes(changedRelationType)
+      ) {
+        set(state, ['modifiedData', 'targetAttribute'], null);
+
+        return;
+      }
+
+      const targetAttributeToSet = pluralize(
+        snakeCase(nameToSlug(oneThatIsCreatingARelationWithAnother)),
+        shouldPluralizeTargetAttribute(modifiedData.relation)
+      );
+
+      set(state, ['modifiedData', 'targetAttribute'], targetAttributeToSet);
+    },
+    onChangeRelationType: (state, action: PayloadAction<OnChangeRelationTypePayload>) => {
+      const {
+        target: { oneThatIsCreatingARelationWithAnother, value },
+      } = action.payload;
+
+      const currentName = state.modifiedData.name ?? '';
+
+      // Switching from oneWay
+      if (!['oneWay', 'manyWay'].includes(value)) {
+        set(state, ['modifiedData', 'relation'], value);
+        const currentTargetAttribute = state.modifiedData.targetAttribute;
+
+        set(
+          state,
+          ['modifiedData', 'name'],
+          pluralize(snakeCase(nameToSlug(currentName)), shouldPluralizeName(value))
+        );
+
+        set(
+          state,
+          ['modifiedData', 'targetAttribute'],
+          pluralize(
+            currentTargetAttribute || snakeCase(nameToSlug(oneThatIsCreatingARelationWithAnother)),
+            shouldPluralizeTargetAttribute(value)
+          )
+        );
+
+        return;
+      }
+
+      if (value === 'oneWay') {
+        set(state, ['modifiedData', 'relation'], 'oneToOne');
+        set(state, ['modifiedData', 'targetAttribute'], null);
+        set(state, ['modifiedData', 'name'], pluralize(snakeCase(currentName), 1));
+
+        return;
+      }
+
+      // manyWay
+      set(state, ['modifiedData', 'relation'], 'oneToMany');
+      set(state, ['modifiedData', 'targetAttribute'], null);
+      set(state, ['modifiedData', 'name'], pluralize(snakeCase(currentName), 2));
+    },
+    resetProps: () => {
+      return initialState;
+    },
+    resetPropsAndSetFormForAddingAnExistingCompo: (
+      state,
+      action: PayloadAction<ResetPropsAndSetFormForAddingAnExistingCompoPayload>
+    ) => {
+      const { options = {} } = action.payload;
+      const modifiedData = {
+        type: 'component',
+        repeatable: true,
+        ...options,
+      };
+
+      return {
+        ...initialState,
+        modifiedData,
+        pristineData: modifiedData,
+      };
+    },
+    resetPropsAndSaveCurrentData: (
+      state,
+      action: PayloadAction<ResetPropsAndSaveCurrentDataPayload>
+    ) => {
+      const { options = {} } = action.payload;
+      // This is run when the user has created a new component
+      const componentToCreate = state.modifiedData.componentToCreate;
+
+      if (
+        componentToCreate?.displayName === undefined ||
+        componentToCreate.category === undefined
+      ) {
+        return initialState;
+      }
+
+      const modifiedData = {
+        displayName: componentToCreate.displayName,
+        type: 'component',
+        repeatable: false,
+        ...options,
+        component: createComponentUid(componentToCreate.displayName, componentToCreate.category),
+      };
+
+      // `pristineData` stays `{}` on purpose: the component described in step 1 is only created
+      // when step 2 is submitted, so closing here would lose it.
+      return {
+        ...initialState,
+        componentToCreate,
+        modifiedData,
+        isCreatingComponentWhileAddingAField: state.modifiedData.createComponent === true,
+      };
+    },
+    resetPropsAndSetTheFormForAddingACompoToADz: (state) => {
+      const createdDZ = state.modifiedData;
+      const dataToSet = {
+        ...createdDZ,
+        createComponent: true,
+        componentToCreate: { type: 'component' as const },
+      };
+
+      return { ...initialState, modifiedData: dataToSet, pristineData: dataToSet };
+    },
+    setDataToEdit: (state, action: PayloadAction<SetDataToEditPayload>) => {
+      const { data } = action.payload;
+      state.modifiedData = data;
+      state.initialData = data;
+      state.pristineData = data;
+      state.formErrors = {};
+    },
+    setAttributeDataSchema: (state, action: PayloadAction<SetAttributeDataSchemaPayload>) => {
+      const { isEditing } = action.payload;
+
+      // The errors describe the data being replaced below, so they no longer apply. Leaving
+      // them behind surfaces the previous attempt's errors on a freshly picked, blank type.
+      // See https://github.com/strapi/strapi/issues/20947
+      state.formErrors = {};
+
+      if (isEditing === true) {
+        const { modifiedDataToSetForEditing } = action.payload;
+        state.modifiedData = modifiedDataToSetForEditing;
+        state.initialData = modifiedDataToSetForEditing;
+        state.pristineData = modifiedDataToSetForEditing;
+
+        return;
+      }
+
+      const { attributeType, nameToSetForRelation, targetUid, step, options = {} } = action.payload;
+
+      let dataToSet;
+
+      if (attributeType === 'component') {
+        if (step === '1') {
           dataToSet = {
-            ...options,
-            type: 'dynamiczone',
-            components: [],
-          };
-        } else if (attributeType === 'text') {
-          dataToSet = { ...options, type: 'string' };
-        } else if (attributeType === 'number' || attributeType === 'date') {
-          dataToSet = options;
-        } else if (attributeType === 'media') {
-          dataToSet = {
-            allowedTypes: ['images', 'files', 'videos', 'audios'],
-            type: 'media',
-            multiple: true,
-            ...options,
-          };
-        } else if (attributeType === 'enumeration') {
-          dataToSet = { ...options, type: 'enumeration', enum: [] };
-        } else if (attributeType === 'relation') {
-          dataToSet = {
-            name: snakeCase(nameToSetForRelation),
-            relation: 'oneToOne',
-            targetAttribute: null,
-            target: targetUid,
-            type: 'relation',
+            type: 'component',
+            createComponent: true,
+            componentToCreate: { type: 'component' },
           };
         } else {
-          dataToSet = { ...options, type: attributeType, default: null };
+          dataToSet = {
+            ...options,
+            type: 'component',
+            repeatable: true,
+          };
         }
-
-        draftState.modifiedData = dataToSet;
-
-        break;
+      } else if (attributeType === 'dynamiczone') {
+        dataToSet = {
+          ...options,
+          type: 'dynamiczone',
+          components: [],
+        };
+      } else if (attributeType === 'text') {
+        dataToSet = { ...options, type: 'string' };
+      } else if (attributeType === 'number' || attributeType === 'date') {
+        dataToSet = options;
+      } else if (attributeType === 'media') {
+        dataToSet = {
+          allowedTypes: ['images', 'files', 'videos', 'audios'],
+          type: 'media',
+          multiple: true,
+          ...options,
+        };
+      } else if (attributeType === 'enumeration') {
+        dataToSet = { ...options, type: 'enumeration', enum: [] };
+      } else if (attributeType === 'relation') {
+        dataToSet = {
+          name: snakeCase(nameToSetForRelation),
+          relation: 'oneToOne',
+          targetAttribute: null,
+          target: targetUid,
+          type: 'relation',
+        };
+      } else {
+        dataToSet = { ...options, type: attributeType, default: null };
       }
-      case actions.SET_CUSTOM_FIELD_DATA_SCHEMA: {
-        const { customField, isEditing, modifiedDataToSetForEditing, options = {} } = action;
 
-        if (isEditing) {
-          draftState.modifiedData = modifiedDataToSetForEditing;
-          draftState.initialData = modifiedDataToSetForEditing;
+      state.modifiedData = dataToSet;
+      state.pristineData = dataToSet;
+    },
+    setCustomFieldDataSchema: (state, action: PayloadAction<SetCustomFieldDataSchemaPayload>) => {
+      const { payload } = action;
 
-          break;
-        }
+      state.formErrors = {};
 
-        draftState.modifiedData = { ...options, type: customField.type };
+      if (payload.isEditing === true) {
+        const { modifiedDataToSetForEditing } = action.payload;
+        state.modifiedData = modifiedDataToSetForEditing;
+        state.initialData = modifiedDataToSetForEditing;
+        state.pristineData = modifiedDataToSetForEditing;
 
-        const allOptions = [
-          ...(customField?.options?.base || []),
-          ...(customField?.options?.advanced || []),
-        ];
-
-        const optionDefaults = allOptions.reduce(customFieldDefaultOptionsReducer, []);
-
-        if (optionDefaults.length) {
-          optionDefaults.forEach(({ name, defaultValue }: { name: string; defaultValue: string }) =>
-            set(draftState.modifiedData, name, defaultValue)
-          );
-        }
-
-        break;
+        return;
       }
-      case actions.SET_DYNAMIC_ZONE_DATA_SCHEMA: {
-        draftState.modifiedData = action.attributeToEdit;
-        draftState.initialData = action.attributeToEdit;
-        break;
-      }
-      case actions.SET_ERRORS: {
-        draftState.formErrors = action.errors;
-        break;
-      }
-      default:
-        return draftState;
-    }
-  });
 
-export { initialState, reducer };
+      const { customField, options = {} } = payload;
+
+      state.modifiedData = { ...options, type: customField.type };
+
+      const allOptions = [
+        ...(customField?.options?.base || []),
+        ...(customField?.options?.advanced || []),
+      ];
+
+      const optionDefaults = allOptions.reduce(customFieldDefaultOptionsReducer, []);
+
+      if (optionDefaults.length) {
+        optionDefaults.forEach(({ name, defaultValue }) =>
+          set(state.modifiedData, name, defaultValue)
+        );
+      }
+
+      state.pristineData = state.modifiedData;
+    },
+    setDynamicZoneDataSchema: (state, action: PayloadAction<SetDynamicZoneDataSchemaPayload>) => {
+      const { attributeToEdit } = action.payload;
+      state.modifiedData = attributeToEdit;
+      state.initialData = attributeToEdit;
+      state.pristineData = attributeToEdit;
+      state.formErrors = {};
+    },
+    setErrors: (state, action: PayloadAction<SetErrorsPayload>) => {
+      state.formErrors = action.payload.errors;
+    },
+  },
+});
+
+export { initialState };
+export const { actions, reducer } = slice;

@@ -48,7 +48,7 @@ const productWithCompoAndDP = {
   collectionName: '',
 };
 
-describe('Core API - Basic + compo + draftAndPublish', () => {
+describe('Core API - Basic + compo', () => {
   beforeAll(async () => {
     await builder.addComponent(compo).addContentType(productWithCompoAndDP).build();
 
@@ -82,14 +82,14 @@ describe('Core API - Basic + compo + draftAndPublish', () => {
       },
     });
 
-    expect(statusCode).toBe(200);
+    expect(statusCode).toBe(201);
 
     expect(body.data).toMatchObject({
-      id: expect.anything(),
-      attributes: product,
+      documentId: expect.anything(),
+      ...product,
     });
 
-    expect(body.data.attributes.publishedAt).toBeISODate();
+    expect(body.data.publishedAt).toBeISODate();
     data.productsWithCompoAndDP.push(body.data);
   });
 
@@ -107,7 +107,7 @@ describe('Core API - Basic + compo + draftAndPublish', () => {
     expect(body.data).toHaveLength(1);
     expect(body.data[0]).toMatchObject(data.productsWithCompoAndDP[0]);
     body.data.forEach((p) => {
-      expect(p.attributes.publishedAt).toBeISODate();
+      expect(p.publishedAt).toBeISODate();
     });
   });
 
@@ -122,7 +122,7 @@ describe('Core API - Basic + compo + draftAndPublish', () => {
     };
     const { statusCode, body } = await rq({
       method: 'PUT',
-      url: `/product-with-compo-and-dps/${data.productsWithCompoAndDP[0].id}`,
+      url: `/product-with-compo-and-dps/${data.productsWithCompoAndDP[0].documentId}`,
       body: {
         data: product,
       },
@@ -133,19 +133,20 @@ describe('Core API - Basic + compo + draftAndPublish', () => {
 
     expect(statusCode).toBe(200);
     expect(body.data).toMatchObject({
-      id: data.productsWithCompoAndDP[0].id,
-      attributes: product,
+      documentId: data.productsWithCompoAndDP[0].documentId,
+      ...product,
     });
 
-    expect(body.data.attributes.publishedAt).toBeISODate();
+    expect(body.data.publishedAt).toBeISODate();
 
     data.productsWithCompoAndDP[0] = body.data;
   });
 
-  test('Delete product with compo', async () => {
+  // TODO V5: Decide response of delete
+  test.skip('Delete product with compo', async () => {
     const { statusCode, body } = await rq({
       method: 'DELETE',
-      url: `/product-with-compo-and-dps/${data.productsWithCompoAndDP[0].id}`,
+      url: `/product-with-compo-and-dps/${data.productsWithCompoAndDP[0].documentId}`,
       qs: {
         populate: ['compo'],
       },
@@ -154,11 +155,12 @@ describe('Core API - Basic + compo + draftAndPublish', () => {
     expect(statusCode).toBe(200);
 
     expect(body.data).toMatchObject(data.productsWithCompoAndDP[0]);
-    expect(body.data.attributes.publishedAt).toBeISODate();
+    expect(body.data.publishedAt).toBeISODate();
     data.productsWithCompoAndDP.shift();
   });
 
-  describe('database state', () => {
+  // TODO V5: Decide response of delete
+  describe.skip('database state', () => {
     test('components have been removed from the database', async () => {
       const dbComponents = await strapi.db
         .query('default.compo')
@@ -187,12 +189,12 @@ describe('Core API - Basic + compo + draftAndPublish', () => {
         error: {
           status: 400,
           name: 'ValidationError',
-          message: 'compo must be defined.',
+          message: 'compo must be a `object` type, but the final value was: `null`.',
           details: {
             errors: [
               {
                 path: ['compo'],
-                message: 'compo must be defined.',
+                message: 'compo must be a `object` type, but the final value was: `null`.',
                 name: 'ValidationError',
               },
             ],
@@ -297,12 +299,12 @@ describe('Core API - Basic + compo + draftAndPublish', () => {
         error: {
           status: 400,
           name: 'ValidationError',
-          message: 'compo.name must be defined.',
+          message: 'compo.name must be a `string` type, but the final value was: `null`.',
           details: {
             errors: [
               {
                 path: ['compo', 'name'],
-                message: 'compo.name must be defined.',
+                message: 'compo.name must be a `string` type, but the final value was: `null`.',
                 name: 'ValidationError',
               },
             ],

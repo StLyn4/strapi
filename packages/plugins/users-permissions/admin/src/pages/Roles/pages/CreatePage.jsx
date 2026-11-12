@@ -2,30 +2,27 @@ import * as React from 'react';
 
 import {
   Button,
-  ContentLayout,
   Flex,
   Grid,
-  GridItem,
-  HeaderLayout,
-  Main,
   Textarea,
   TextInput,
   Typography,
+  Field,
+  Box,
 } from '@strapi/design-system';
-import {
-  CheckPagePermissions,
-  Form,
-  SettingsPageTitle,
-  useFetchClient,
-  useNotification,
-  useOverlayBlocker,
-  useTracking,
-} from '@strapi/helper-plugin';
 import { Check } from '@strapi/icons';
-import { Formik } from 'formik';
+import {
+  Page,
+  useTracking,
+  useNotification,
+  useFetchClient,
+  Layouts,
+  BackButton,
+} from '@strapi/strapi/admin';
+import { Formik, Form } from 'formik';
 import { useIntl } from 'react-intl';
 import { useMutation } from 'react-query';
-import { useHistory } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 
 import UsersPermissions from '../../../components/UsersPermissions';
 import { PERMISSIONS } from '../../../constants';
@@ -35,9 +32,8 @@ import { usePlugins } from '../hooks/usePlugins';
 
 export const CreatePage = () => {
   const { formatMessage } = useIntl();
-  const toggleNotification = useNotification();
-  const { goBack } = useHistory();
-  const { lockApp, unlockApp } = useOverlayBlocker();
+  const { toggleNotification } = useNotification();
+  const navigate = useNavigate();
   const { isLoading: isLoadingPlugins, permissions, routes } = usePlugins();
   const { trackUsage } = useTracking();
   const permissionsRef = React.useRef();
@@ -45,11 +41,11 @@ export const CreatePage = () => {
   const mutation = useMutation((body) => post(`/users-permissions/roles`, body), {
     onError() {
       toggleNotification({
-        type: 'warning',
-        message: {
+        type: 'danger',
+        message: formatMessage({
           id: 'notification.error',
           defaultMessage: 'An error occurred',
-        },
+        }),
       });
     },
 
@@ -58,34 +54,34 @@ export const CreatePage = () => {
 
       toggleNotification({
         type: 'success',
-        message: {
+        message: formatMessage({
           id: getTrad('Settings.roles.created'),
           defaultMessage: 'Role created',
-        },
+        }),
       });
 
       // Forcing redirecting since we don't have the id in the response
-      goBack();
+      navigate(-1);
     },
   });
 
   const handleCreateRoleSubmit = async (data) => {
-    lockApp();
-
     // TODO: refactor. Child -> parent component communication is evil;
     // We should either move the provider one level up or move the state
     // straight into redux.
     const permissions = permissionsRef.current.getPermissions();
 
     await mutation.mutate({ ...data, ...permissions, users: [] });
-
-    unlockApp();
   };
 
   return (
-    <Main>
-      {/* TODO: This needs to be translated */}
-      <SettingsPageTitle name="Roles" />
+    <Page.Main>
+      <Page.Title>
+        {formatMessage(
+          { id: 'Settings.PageTitle', defaultMessage: 'Settings - {name}' },
+          { name: 'Roles' }
+        )}
+      </Page.Title>
       <Formik
         enableReinitialize
         initialValues={{ name: '', description: '' }}
@@ -94,10 +90,15 @@ export const CreatePage = () => {
       >
         {({ handleSubmit, values, handleChange, errors }) => (
           <Form noValidate onSubmit={handleSubmit}>
-            <HeaderLayout
+            <Layouts.Header
               primaryAction={
                 !isLoadingPlugins && (
-                  <Button type="submit" loading={mutation.isLoading} startIcon={<Check />}>
+                  <Button
+                    type="submit"
+                    loading={mutation.isLoading}
+                    startIcon={<Check />}
+                    fullWidth
+                  >
                     {formatMessage({
                       id: 'global.save',
                       defaultMessage: 'Save',
@@ -113,8 +114,14 @@ export const CreatePage = () => {
                 id: 'Settings.roles.create.description',
                 defaultMessage: 'Define the rights given to the role',
               })}
+              navigationAction={
+                // The back link for mobile works differently; it is placed higher up in the DOM.
+                <Box display={{ initial: 'none', medium: 'block' }}>
+                  <BackButton fallback=".." />
+                </Box>
+              }
             />
-            <ContentLayout>
+            <Layouts.Content>
               <Flex
                 background="neutral0"
                 direction="column"
@@ -128,40 +135,37 @@ export const CreatePage = () => {
                 shadow="filterShadow"
               >
                 <Flex direction="column" alignItems="stretch">
-                  <Typography variant="delta" as="h2">
+                  <Typography variant="delta" tag="h2">
                     {formatMessage({
                       id: getTrad('EditPage.form.roles'),
                       defaultMessage: 'Role details',
                     })}
                   </Typography>
 
-                  <Grid gap={4}>
-                    <GridItem col={6}>
-                      <TextInput
+                  <Grid.Root gap={4}>
+                    <Grid.Item col={6} xs={12} direction="column" alignItems="stretch">
+                      <Field.Root
                         name="name"
-                        value={values.name || ''}
-                        onChange={handleChange}
-                        label={formatMessage({
-                          id: 'global.name',
-                          defaultMessage: 'Name',
-                        })}
                         error={
                           errors?.name
                             ? formatMessage({ id: errors.name, defaultMessage: 'Name is required' })
                             : false
                         }
                         required
-                      />
-                    </GridItem>
-                    <GridItem col={6}>
-                      <Textarea
-                        id="description"
-                        value={values.description || ''}
-                        onChange={handleChange}
-                        label={formatMessage({
-                          id: 'global.description',
-                          defaultMessage: 'Description',
-                        })}
+                      >
+                        <Field.Label>
+                          {formatMessage({
+                            id: 'global.name',
+                            defaultMessage: 'Name',
+                          })}
+                        </Field.Label>
+                        <TextInput type="text" value={values.name || ''} onChange={handleChange} />
+                        <Field.Error />
+                      </Field.Root>
+                    </Grid.Item>
+                    <Grid.Item col={6} xs={12} direction="column" alignItems="stretch">
+                      <Field.Root
+                        name="description"
                         error={
                           errors?.description
                             ? formatMessage({
@@ -171,9 +175,18 @@ export const CreatePage = () => {
                             : false
                         }
                         required
-                      />
-                    </GridItem>
-                  </Grid>
+                      >
+                        <Field.Label>
+                          {formatMessage({
+                            id: 'global.description',
+                            defaultMessage: 'Description',
+                          })}
+                        </Field.Label>
+                        <Textarea value={values.description || ''} onChange={handleChange} />
+                        <Field.Error />
+                      </Field.Root>
+                    </Grid.Item>
+                  </Grid.Root>
                 </Flex>
 
                 {!isLoadingPlugins && (
@@ -184,16 +197,16 @@ export const CreatePage = () => {
                   />
                 )}
               </Flex>
-            </ContentLayout>
+            </Layouts.Content>
           </Form>
         )}
       </Formik>
-    </Main>
+    </Page.Main>
   );
 };
 
 export const ProtectedRolesCreatePage = () => (
-  <CheckPagePermissions permissions={PERMISSIONS.createRole}>
+  <Page.Protect permissions={PERMISSIONS.createRole}>
     <CreatePage />
-  </CheckPagePermissions>
+  </Page.Protect>
 );

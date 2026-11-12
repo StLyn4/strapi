@@ -8,6 +8,7 @@ const { createStrapiInstance } = require('api-tests/strapi');
 const { createAuthRequest } = require('api-tests/request');
 const modelsUtils = require('api-tests/models');
 const { createTestBuilder } = require('api-tests/builder');
+const { kebabCase } = require('lodash');
 
 let strapi;
 let rq;
@@ -48,6 +49,7 @@ describe('Content Type Builder - Content types', () => {
     await restart();
   });
 
+  // TODO FIXME: this depends on all tests to run or else it throws an error
   afterAll(async () => {
     const modelsUIDs = [
       'api::test-collection-type.test-collection-type',
@@ -77,6 +79,7 @@ describe('Content Type Builder - Content types', () => {
             displayName: 'Test Collection Type',
             singularName: 'test-collection-type',
             pluralName: 'test-collection-types',
+            draftAndPublish: true,
             pluginOptions: {
               i18n: {
                 localized: true,
@@ -114,7 +117,7 @@ describe('Content Type Builder - Content types', () => {
       expect(res.body).toMatchSnapshot();
     });
 
-    test('Successful creation of a collection type with draftAndPublish enabled', async () => {
+    test('Successful creation of a collection type', async () => {
       const res = await rq({
         method: 'POST',
         url: '/content-type-builder/content-types',
@@ -141,7 +144,7 @@ describe('Content Type Builder - Content types', () => {
       });
     });
 
-    test('Get collection type returns full schema and informations with draftAndPublish', async () => {
+    test('Get collection type returns full schema and informations', async () => {
       const res = await rq({
         method: 'GET',
         url: `/content-type-builder/content-types/${ctWithDpUID}`,
@@ -152,52 +155,113 @@ describe('Content Type Builder - Content types', () => {
     });
 
     test.each([
-      ['singularName', 'singularName'],
-      ['singularName', 'pluralName'],
-      ['pluralName', 'singularName'],
-      ['pluralName', 'pluralName'],
-      ['pluralName', 'collectionName'],
-    ])(`Cannot use %p that exists as another type's %p`, async (sourceField, matchField) => {
-      const body = {
-        contentType: {
-          displayName: 'Frogs Frogs Frogs',
-          pluralName: 'safe-plural-name',
-          singularName: 'safe-singular-name',
-          collectionName: 'safe-collection-name',
-          attributes: {
-            name: {
-              type: 'string',
+      ['singularName', 'singularName', 'dog'],
+      ['singularName', 'pluralName', 'dogs'],
+      ['pluralName', 'singularName', 'dog'],
+      ['pluralName', 'pluralName', 'dogs'],
+      ['pluralName', 'collectionName', 'dogs-collection'],
+    ])(
+      `Cannot use %p that exists as another type's %p`,
+      async (sourceField, matchField, sourceValue) => {
+        const body = {
+          contentType: {
+            displayName: 'Frogs Frogs Frogs',
+            pluralName: 'safe-plural-name',
+            singularName: 'safe-singular-name',
+            collectionName: 'safe-collection-name',
+            attributes: {
+              name: {
+                type: 'string',
+              },
             },
           },
-        },
-      };
+        };
 
-      // set the conflicting name in the given field
-      body.contentType[sourceField] = localTestData.models.dog[matchField];
+        // set the conflicting name in the given field
+        body.contentType[sourceField] = localTestData.models.dog[matchField];
 
-      const res = await rq({
-        method: 'POST',
-        url: '/content-type-builder/content-types',
-        body,
-      });
+        const res = await rq({
+          method: 'POST',
+          url: '/content-type-builder/content-types',
+          body,
+        });
 
-      expect(res.statusCode).toBe(400);
-      expect(res.body).toEqual({
-        error: {
-          details: {
-            errors: [
-              {
-                message: `contentType: name \`${body.contentType[sourceField]}\` is already being used by another content type.`,
-                name: 'ValidationError',
-                path: ['contentType', sourceField],
-              },
-            ],
+        expect(res.statusCode).toBe(400);
+        expect(res.body).toEqual({
+          error: {
+            details: {
+              errors: [
+                {
+                  message: `contentType: name \`${body.contentType[sourceField]}\` is already being used by another content type.`,
+                  name: 'ValidationError',
+                  path: ['contentType', sourceField],
+                  value: sourceValue,
+                },
+              ],
+            },
+            message: `contentType: name \`${body.contentType[sourceField]}\` is already being used by another content type.`,
+            name: 'ValidationError',
           },
-          message: `contentType: name \`${body.contentType[sourceField]}\` is already being used by another content type.`,
-          name: 'ValidationError',
-        },
-      });
-    });
+        });
+      }
+    );
+
+    test.each(['strapi', '_strapi', '__strapi'])(
+      'Cannot use %s prefix for content type name',
+      async (prefix) => {
+        const res = await rq({
+          method: 'POST',
+          url: '/content-type-builder/content-types',
+          body: {
+            contentType: {
+              displayName: 'unique string',
+              singularName: `${kebabCase(prefix)}-singular`,
+              pluralName: `${kebabCase(prefix)}-plural`,
+              attributes: {
+                [prefix]: {
+                  type: 'string',
+                },
+              },
+            },
+          },
+        });
+
+        expect(res.statusCode).toBe(400);
+        expect(res.body).toEqual({
+          error: {
+            details: {
+              errors: [
+                {
+                  message:
+                    'Attribute keys cannot be one of id, document_id, created_at, updated_at, published_at, created_by_id, updated_by_id, created_by, updated_by, entry_id, localizations, meta, locale, __component, __contentType, strapi*, _strapi*, __strapi*, status',
+                  name: 'ValidationError',
+                  path: ['contentType', 'attributes', prefix],
+                  value: {
+                    type: 'string',
+                  },
+                },
+                {
+                  message:
+                    'Content Type name cannot be one of boolean, date, date_time, time, upload, document, then, strapi*, _strapi*, __strapi*',
+                  name: 'ValidationError',
+                  path: ['contentType', 'singularName'],
+                  value: 'strapi-singular',
+                },
+                {
+                  message:
+                    'Content Type name cannot be one of boolean, date, date_time, time, upload, document, then, strapi*, _strapi*, __strapi*',
+                  name: 'ValidationError',
+                  path: ['contentType', 'pluralName'],
+                  value: 'strapi-plural',
+                },
+              ],
+            },
+            message: '3 errors occurred',
+            name: 'ValidationError',
+          },
+        });
+      }
+    );
 
     test('Cannot use same string for singularName and pluralName', async () => {
       const res = await rq({
@@ -208,7 +272,6 @@ describe('Content Type Builder - Content types', () => {
             displayName: 'same string',
             singularName: 'same-string',
             pluralName: 'same-string',
-            draftAndPublish: true,
             attributes: {
               title: {
                 type: 'string',
@@ -227,6 +290,16 @@ describe('Content Type Builder - Content types', () => {
                 message: 'contentType: singularName and pluralName should be different',
                 name: 'ValidationError',
                 path: ['contentType'],
+                value: {
+                  displayName: 'same string',
+                  singularName: 'same-string',
+                  pluralName: 'same-string',
+                  attributes: {
+                    title: {
+                      type: 'string',
+                    },
+                  },
+                },
               },
             ],
           },
@@ -276,11 +349,69 @@ describe('Content Type Builder - Content types', () => {
                 message: 'contentType: singularName and pluralName should be different',
                 name: 'ValidationError',
                 path: ['contentType'],
+                value: {
+                  draftAndPublish: true,
+                  attributes: {
+                    title: {
+                      type: 'string',
+                    },
+                  },
+                },
               },
             ],
           },
           message: '4 errors occurred',
           name: 'ValidationError',
+        },
+      });
+    });
+
+    test('Returns the error message when the validation of a creation throws a native error', async () => {
+      const res = await rq({
+        method: 'POST',
+        url: '/content-type-builder/content-types',
+        body: {
+          contentType: {
+            displayName: 'Native error',
+            singularName: 'native-error',
+            pluralName: 'native-errors',
+            attributes: {
+              title: {
+                type: 'string',
+                regex: '(',
+              },
+            },
+          },
+        },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({
+        error: {
+          name: 'SyntaxError',
+          message: expect.stringContaining('Invalid regular expression'),
+          details: {},
+        },
+      });
+    });
+
+    test('Returns the error message when the validation of an update throws a native error', async () => {
+      const res = await rq({
+        method: 'PUT',
+        url: `/content-type-builder/content-types/${ctWithDpUID}`,
+        body: {
+          contentType: {
+            kind: 'collectionType',
+          },
+        },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({
+        error: {
+          name: 'TypeError',
+          message: expect.stringContaining('undefined'),
+          details: {},
         },
       });
     });
@@ -332,6 +463,44 @@ describe('Content Type Builder - Content types', () => {
       });
     });
 
+    test('Keeps draftAndPublish when the update payload does not set it', async () => {
+      const uid = 'api::ct-with-dp.ct-with-dp';
+      let res = await rq({
+        method: 'PUT',
+        url: `/content-type-builder/content-types/${uid}`,
+        body: {
+          contentType: {
+            displayName: 'new displayName',
+            singularName: 'ct-with-dp',
+            pluralName: 'ct-with-dps',
+            attributes: {
+              title: {
+                type: 'string',
+              },
+            },
+          },
+        },
+      });
+      expect(res.statusCode).toBe(201);
+
+      await restart();
+
+      res = await rq({
+        method: 'GET',
+        url: `/content-type-builder/content-types/${uid}`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toMatchObject({
+        data: {
+          uid,
+          schema: {
+            draftAndPublish: true,
+          },
+        },
+      });
+    });
+
     test.each([
       ['kebab-case', 'kebab-cases', true],
       ['Kebab-case', 'Kebab-cases', false],
@@ -350,7 +519,6 @@ describe('Content Type Builder - Content types', () => {
             displayName: 'same string',
             singularName,
             pluralName,
-            draftAndPublish: true,
             attributes: {
               title: {
                 type: 'string',

@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { RawData, WebSocket } from 'ws';
 
-import type { Client, Server } from '../../../types/remote/protocol';
+import type { Client, Server } from '../../types/remote/protocol';
 
 import {
   ProviderError,
@@ -10,23 +10,33 @@ import {
   ProviderValidationError,
   ProviderErrorDetails,
 } from '../../errors/providers';
+import { IDiagnosticReporter } from '../../utils/diagnostic';
+import { stringifyTransferWebSocketPayload } from '../../utils/transfer-websocket-json';
 
 interface IDispatcherState {
   transfer?: { kind: Client.TransferKind; id: string };
 }
 
+export interface RetryMessageOptions {
+  retryMessageMaxRetries: number;
+  retryMessageTimeout: number;
+}
+
 interface IDispatchOptions {
   attachTransfer?: boolean;
+  /** Merged onto the dispatcher's default `retryMessageOptions` for this message only. */
+  retryOverrides?: Partial<RetryMessageOptions>;
 }
 
 type Dispatch<T> = Omit<T, 'transferID' | 'uuid'>;
 
 export const createDispatcher = (
   ws: WebSocket,
-  retryMessageOptions = {
+  retryMessageOptions: RetryMessageOptions = {
     retryMessageMaxRetries: 5,
     retryMessageTimeout: 30000,
-  }
+  },
+  reportInfo?: (message: string) => void
 ) => {
   const state: IDispatcherState = {};
 
@@ -49,13 +59,28 @@ export const createDispatcher = (
         Object.assign(payload, { transferID: state.transfer?.id });
       }
 
-      const stringifiedPayload = JSON.stringify(payload);
+      if (message.type === 'command') {
+        reportInfo?.(
+          `dispatching message command:${(message as Client.CommandMessage).command} uuid:${uuid} sent:${numberOfTimesMessageWasSent}`
+        );
+      } else if (message.type === 'transfer') {
+        const messageToSend = message as Client.TransferMessage;
+        reportInfo?.(
+          `dispatching message action:${messageToSend.action} ${messageToSend.kind === 'step' ? `step:${messageToSend.step}` : ''} uuid:${uuid} sent:${numberOfTimesMessageWasSent}`
+        );
+      }
+      const stringifiedPayload = stringifyTransferWebSocketPayload(
+        payload as Record<string, unknown>
+      );
       ws.send(stringifiedPayload, (error) => {
         if (error) {
           reject(error);
         }
       });
-      const { retryMessageMaxRetries, retryMessageTimeout } = retryMessageOptions;
+      const { retryMessageMaxRetries, retryMessageTimeout } = {
+        ...retryMessageOptions,
+        ...options.retryOverrides,
+      };
       const sendPeriodically = () => {
         if (numberOfTimesMessageWasSent <= retryMessageMaxRetries) {
           numberOfTimesMessageWasSent += 1;
@@ -72,6 +97,16 @@ export const createDispatcher = (
 
       const onResponse = (raw: RawData) => {
         const response: Server.Message<U> = JSON.parse(raw.toString());
+        if (message.type === 'command') {
+          reportInfo?.(
+            `received response to message command: ${(message as Client.CommandMessage).command} uuid: ${uuid} sent: ${numberOfTimesMessageWasSent}`
+          );
+        } else if (message.type === 'transfer') {
+          const messageToSend = message as Client.TransferMessage;
+          reportInfo?.(
+            `received response to message action:${messageToSend.action} ${messageToSend.kind === 'step' ? `step:${messageToSend.step}` : ''} uuid:${uuid} sent:${numberOfTimesMessageWasSent}`
+          );
+        }
         if (response.uuid === uuid) {
           clearInterval(interval);
           if (response.error) {
@@ -117,12 +152,13 @@ export const createDispatcher = (
   const dispatchTransferStep = async <
     T,
     A extends Client.TransferPushMessage['action'] = Client.TransferPushMessage['action'],
-    S extends Client.TransferPushStep = Client.TransferPushStep
+    S extends Client.TransferPushStep = Client.TransferPushStep,
   >(
     payload: {
       step: S;
       action: A;
-    } & (A extends 'stream' ? { data: Client.GetTransferPushStreamData<S> } : unknown)
+    } & (A extends 'stream' ? { data: Client.GetTransferPushStreamData<S> } : unknown),
+    dispatchOptions?: Omit<IDispatchOptions, 'attachTransfer'>
   ) => {
     const message: Dispatch<Client.TransferPushMessage> = {
       type: 'transfer',
@@ -130,7 +166,9 @@ export const createDispatcher = (
       ...payload,
     };
 
-    return dispatch<T>(message, { attachTransfer: true }) ?? Promise.resolve(null);
+    return (
+      dispatch<T>(message, { attachTransfer: true, ...dispatchOptions }) ?? Promise.resolve(null)
+    );
   };
 
   const setTransferProperties = (
@@ -161,7 +199,11 @@ type WebsocketParams = ConstructorParameters<typeof WebSocket>;
 type Address = WebsocketParams[0];
 type Options = WebsocketParams[2];
 
-export const connectToWebsocket = (address: Address, options?: Options): Promise<WebSocket> => {
+export const connectToWebsocket = (
+  address: Address,
+  options?: Options,
+  diagnostics?: IDiagnosticReporter
+): Promise<WebSocket> => {
   return new Promise((resolve, reject) => {
     const server = new WebSocket(address, options);
     server.once('open', () => {
@@ -200,6 +242,15 @@ export const connectToWebsocket = (address: Address, options?: Options): Promise
       );
     });
 
+    server.on('message', (raw: RawData) => {
+      const response: Server.Message = JSON.parse(raw.toString());
+      if (response.diagnostic) {
+        diagnostics?.report({
+          ...response.diagnostic,
+        });
+      }
+    });
+
     server.once('error', (err) => {
       reject(
         new ProviderTransferError(err.message, {
@@ -214,4 +265,18 @@ export const connectToWebsocket = (address: Address, options?: Options): Promise
 
 export const trimTrailingSlash = (input: string): string => {
   return input.replace(/\/$/, '');
+};
+
+export const wait = (ms: number) => {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+};
+
+export const waitUntil = async (test: () => boolean, interval: number): Promise<void> => {
+  while (!test()) {
+    await wait(interval);
+  }
+
+  return Promise.resolve();
 };

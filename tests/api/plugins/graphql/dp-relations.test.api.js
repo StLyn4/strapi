@@ -1,7 +1,7 @@
 'use strict';
 
 // Helpers.
-const { pick } = require('lodash/fp');
+
 const { createTestBuilder } = require('api-tests/builder');
 const { createStrapiInstance } = require('api-tests/strapi');
 const { createAuthRequest } = require('api-tests/request');
@@ -11,19 +11,16 @@ let strapi;
 let rq;
 let graphqlQuery;
 
-// Utils
-const selectFields = pick(['name']);
-
-const documentModel = {
+const articleModel = {
   attributes: {
     name: {
       type: 'richtext',
     },
   },
   draftAndPublish: true,
-  singularName: 'document',
-  pluralName: 'documents',
-  displayName: 'Document',
+  singularName: 'article',
+  pluralName: 'articles',
+  displayName: 'Article',
   description: '',
   collectionName: '',
 };
@@ -33,13 +30,24 @@ const labelModel = {
     name: {
       type: 'richtext',
     },
-    documents: {
+    articles: {
       type: 'relation',
       relation: 'manyToMany',
-      target: 'api::document.document',
+      target: 'api::article.article',
       targetAttribute: 'labels',
     },
+    one_to_many_articles: {
+      type: 'relation',
+      relation: 'oneToMany',
+      target: 'api::article.article',
+      targetAttribute: 'label',
+    },
+    dz: {
+      type: 'dynamiczone',
+      components: ['default.component-with-relation'],
+    },
   },
+  draftAndPublish: true,
   singularName: 'label',
   pluralName: 'labels',
   displayName: 'Label',
@@ -47,30 +55,111 @@ const labelModel = {
   collectionName: '',
 };
 
-const labels = [{ name: 'label 1' }, { name: 'label 2' }];
-const documents = ({ label: labels }) => {
+const componentWithOneToManyRelation = {
+  displayName: 'component-with-relation',
+  attributes: {
+    name: {
+      type: 'string',
+    },
+    articles: {
+      type: 'relation',
+      relation: 'oneToMany',
+      target: 'api::article.article',
+    },
+  },
+};
+
+const labels = [
+  { name: 'label 1', documentId: 'label-1', publishedAt: new Date() },
+  { name: 'label 1', documentId: 'label-1', publishedAt: null },
+  { name: 'label 2', documentId: 'label-2', publishedAt: new Date() },
+  { name: 'label 2', documentId: 'label-2', publishedAt: null },
+];
+
+const articles = ({ label: labels }) => {
   const labelIds = labels.map((label) => label.id);
+
   return [
-    { name: 'document 1', labels: labelIds },
-    { name: 'document 2', labels: labelIds },
+    {
+      name: 'article 1',
+      documentId: 'article-1',
+      publishedAt: new Date(),
+      labels: labelIds,
+      label: labelIds[0],
+    },
+    {
+      name: 'article 1',
+      documentId: 'article-1',
+      publishedAt: null,
+      labels: labelIds,
+      label: labelIds[1],
+    },
+    {
+      name: 'article 2',
+      documentId: 'article-2',
+      publishedAt: new Date(),
+      labels: labelIds,
+      label: labelIds[0],
+    },
+    {
+      name: 'article 2',
+      documentId: 'article-2',
+      publishedAt: null,
+      labels: labelIds,
+      label: labelIds[1],
+    },
   ];
 };
 
 describe('Test Graphql Relations with Draft and Publish enabled', () => {
   const data = {
     labels: [],
-    documents: [],
+    articles: [],
   };
 
   beforeAll(async () => {
     await builder
-      .addContentTypes([documentModel, labelModel])
+      .addContentType(articleModel)
+      .addComponent(componentWithOneToManyRelation)
+      .addContentType(labelModel)
       .addFixtures(labelModel.singularName, labels)
-      .addFixtures(documentModel.singularName, documents)
+      .addFixtures(articleModel.singularName, articles)
       .build();
 
     strapi = await createStrapiInstance();
     rq = await createAuthRequest({ strapi });
+
+    // Add dynamic zones to test data
+    await strapi.documents('api::label.label').update({
+      documentId: 'label-1',
+      data: {
+        dz: [
+          {
+            __component: 'default.component-with-relation',
+            articles: ['article-1'],
+            name: 'TEST DZ',
+          },
+        ],
+      },
+    });
+    await strapi.documents('api::label.label').update({
+      documentId: 'label-2',
+      data: {
+        dz: [
+          {
+            __component: 'default.component-with-relation',
+            articles: ['article-2'],
+            name: 'TEST DZ',
+          },
+        ],
+      },
+    });
+    await strapi.documents('api::label.label').publish({
+      documentId: 'label-1',
+    });
+    await strapi.documents('api::label.label').publish({
+      documentId: 'label-2',
+    });
 
     graphqlQuery = (body) => {
       return rq({
@@ -91,11 +180,12 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            labels {
+            labels_connection {
               data {
-                id
+                documentId
                 attributes {
                   name
+                  publishedAt
                 }
               }
             }
@@ -106,32 +196,30 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
       const { body } = res;
 
       expect(res.statusCode).toBe(200);
-      expect(body).toMatchObject({
-        data: {
-          labels: {
-            data: labels.map((label) => ({ id: expect.any(String), attributes: label })),
-          },
-        },
-      });
+      expect(body.data.labels_connection.data.length).toBe(2);
+      expect(body.data.labels_connection.data.every((label) => label.attributes.publishedAt)).toBe(
+        true
+      );
 
       // assign for later use
-      data.labels = data.labels.concat(res.body.data.labels.data);
+      data.labels = data.labels.concat(res.body.data.labels_connection.data);
     });
 
-    test('List preview documents with labels', async () => {
+    test('List preview articles with labels', async () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            documents(publicationState: PREVIEW) {
+            articles_connection(status: DRAFT) {
               data {
-                id
+                documentId
                 attributes {
                   name
                   labels {
                     data {
-                      id
+                      documentId
                       attributes {
                         name
+                        publishedAt
                       }
                     }
                   }
@@ -143,27 +231,23 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
       });
 
       const { body } = res;
-
       expect(res.statusCode).toBe(200);
-      expect(body).toMatchObject({
-        data: {
-          documents: {
-            data: expect.arrayContaining(data.documents),
-          },
-        },
-      });
+      expect(body.data.articles_connection.data.length).toBe(2);
+      expect(
+        body.data.articles_connection.data.every((article) => article.attributes.publishedAt)
+      ).toBe(false);
 
       // assign for later use
-      data.documents = res.body.data.documents.data;
+      data.articles = res.body.data.articles_connection.data;
     });
 
-    test('Publish document', async () => {
+    test('Publish article', async () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
-          mutation publishDocument($id: ID!, $data: DocumentInput!) {
-            updateDocument(id: $id, data: $data) {
+          mutation publishArticle($documentId: ID!, $data: ArticleInput!) {
+            updateArticle(documentId: $documentId, data: $data, status: PUBLISHED) {
               data {
-                id
+                documentId
                 attributes {
                   name
                   publishedAt
@@ -173,10 +257,8 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
           }
         `,
         variables: {
-          id: data.documents[0].id,
-          data: {
-            publishedAt: new Date().toISOString(),
-          },
+          documentId: data.articles[0].documentId,
+          data: {},
         },
       });
 
@@ -185,11 +267,11 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
       expect(res.statusCode).toBe(200);
       expect(body).toMatchObject({
         data: {
-          updateDocument: {
+          updateArticle: {
             data: {
-              id: data.documents[0].id,
+              documentId: data.articles[0].documentId,
               attributes: {
-                name: data.documents[0].attributes.name,
+                name: data.articles[0].attributes.name,
                 publishedAt: expect.any(String),
               },
             },
@@ -198,18 +280,39 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
       });
     });
 
-    test('List labels with live documents', async () => {
+    test('List labels with published articles', async () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            labels {
+            labels_connection {
               data {
-                id
+                documentId
                 attributes {
                   name
-                  documents {
+                  dz {
+                    ... on ComponentDefaultComponentWithRelation {
+                      articles_connection {
+                        data {
+                          documentId
+                          attributes {
+                            name
+                            publishedAt
+                          }
+                        }
+                      }
+                    }
+                  }
+                  one_to_many_articles_connection {
                     data {
-                      id
+                      documentId
+                      attributes {
+                        publishedAt
+                      }
+                    }
+                  }
+                  articles_connection {
+                    data {
+                      documentId
                       attributes {
                         name
                         publishedAt
@@ -226,48 +329,70 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
       const { body } = res;
 
       expect(res.statusCode).toBe(200);
-      expect(body).toMatchObject({
-        data: {
-          labels: {
-            data: expect.arrayContaining(
-              data.labels.map((label) => ({
-                id: label.id,
-                attributes: {
-                  ...label.attributes,
-                  documents: {
-                    data: expect.arrayContaining(
-                      // Only the first document is published
-                      data.documents.slice(0, 1).map((document) => ({
-                        id: document.id,
-                        attributes: {
-                          ...selectFields(document.attributes),
-                          publishedAt: expect.any(String),
-                        },
-                      }))
-                    ),
-                  },
-                },
-              }))
-            ),
-          },
-        },
-      });
+      // Check the manyToMany response
+      expect(body.data.labels_connection.data[0].attributes.articles_connection.data.length).toBe(
+        2
+      );
+      expect(
+        body.data.labels_connection.data[0].attributes.articles_connection.data.every(
+          (article) => article.attributes.publishedAt
+        )
+      ).toBe(true);
+      // Check the oneToMany response
+      expect(
+        body.data.labels_connection.data[0].attributes.one_to_many_articles_connection.data.length
+      ).toBe(2);
+      expect(
+        body.data.labels_connection.data[0].attributes.one_to_many_articles_connection.data.every(
+          (article) => article.attributes.publishedAt
+        )
+      ).toBe(true);
+      // Check dynamic zone with relations
+      expect(body.data.labels_connection.data[0].attributes.dz.length).toBe(1);
+      expect(
+        body.data.labels_connection.data[0].attributes.dz[0].articles_connection.data.every(
+          (article) => article.attributes.publishedAt
+        )
+      ).toBe(true);
     });
 
-    test('List labels with preview documents', async () => {
+    test('List labels with draft articles', async () => {
       const res = await graphqlQuery({
         query: /* GraphQL */ `
           {
-            labels {
+            labels_connection(status: DRAFT) {
               data {
-                id
+                documentId
+                publishedAt
                 attributes {
                   name
-                  documents(publicationState: PREVIEW) {
+                  dz {
+                    ... on ComponentDefaultComponentWithRelation {
+                      articles_connection {
+                        data {
+                          documentId
+                          attributes {
+                            name
+                            publishedAt
+                          }
+                        }
+                      }
+                    }
+                  }
+                  one_to_many_articles_connection {
                     data {
-                      id
+                      documentId
+                      attributes {
+                        publishedAt
+                      }
+                    }
+                  }
+                  articles_connection {
+                    data {
+                      documentId
                       attributes {
                         name
+                        publishedAt
                       }
                     }
                   }
@@ -281,29 +406,126 @@ describe('Test Graphql Relations with Draft and Publish enabled', () => {
       const { body } = res;
 
       expect(res.statusCode).toBe(200);
-      expect(body).toMatchObject({
-        data: {
-          labels: {
-            data: expect.arrayContaining(
-              data.labels.map((label) => ({
-                id: label.id,
-                attributes: {
-                  ...label.attributes,
-                  documents: {
-                    data: expect.arrayContaining(
-                      // All documents should be returned, even if they are not published
-                      data.documents.map((document) => ({
-                        id: document.id,
-                        attributes: selectFields(document.attributes),
-                      }))
-                    ),
-                  },
-                },
-              }))
-            ),
-          },
-        },
+      // Check the manyToMany response
+      expect(body.data.labels_connection.data[0].attributes.articles_connection.data.length).toBe(
+        2
+      );
+      expect(
+        body.data.labels_connection.data[0].attributes.articles_connection.data.every(
+          (article) => article.attributes.publishedAt
+        )
+      ).toBe(false);
+      // Check the oneToMany response
+      expect(
+        body.data.labels_connection.data[0].attributes.one_to_many_articles_connection.data.length
+      ).toBe(2);
+      expect(
+        body.data.labels_connection.data[0].attributes.one_to_many_articles_connection.data.every(
+          (article) => article.attributes.publishedAt
+        )
+      ).toBe(false);
+      // Check dynamic zone with relations
+      expect(body.data.labels_connection.data[0].attributes.dz.length).toBe(1);
+      expect(
+        body.data.labels_connection.data[0].attributes.dz[0].articles_connection.data.every(
+          (article) => article.attributes.publishedAt
+        )
+      ).toBe(false);
+    });
+
+    // Regression test: combined root queries with different status args must not
+    // cross-contaminate each other's nested relations. Previously a single
+    // `context.rootQueryArgs` was overwritten by the last root field's args, so
+    // the draft branch would inherit `PUBLISHED` and yield empty/null relations.
+    test('Aliased draft + published root queries keep status isolated per branch', async () => {
+      const res = await graphqlQuery({
+        query: /* GraphQL */ `
+          {
+            draft: labels_connection(status: DRAFT) {
+              data {
+                documentId
+                attributes {
+                  publishedAt
+                  articles_connection {
+                    data {
+                      documentId
+                      attributes {
+                        publishedAt
+                      }
+                    }
+                  }
+                  one_to_many_articles_connection {
+                    data {
+                      documentId
+                      attributes {
+                        publishedAt
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            published: labels_connection(status: PUBLISHED) {
+              data {
+                documentId
+                attributes {
+                  publishedAt
+                  articles_connection {
+                    data {
+                      documentId
+                      attributes {
+                        publishedAt
+                      }
+                    }
+                  }
+                  one_to_many_articles_connection {
+                    data {
+                      documentId
+                      attributes {
+                        publishedAt
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `,
       });
+
+      const { body } = res;
+      expect(res.statusCode).toBe(200);
+
+      const draftLabels = body.data.draft.data;
+      const publishedLabels = body.data.published.data;
+
+      expect(draftLabels.length).toBeGreaterThan(0);
+      expect(publishedLabels.length).toBeGreaterThan(0);
+
+      // Parent rows themselves carry the status from their own args, so they
+      // remain correct even with the bug — we still assert it as a sanity check.
+      expect(draftLabels.every((l) => l.attributes.publishedAt === null)).toBe(true);
+      expect(publishedLabels.every((l) => l.attributes.publishedAt !== null)).toBe(true);
+
+      const flatten = (labels, key) => labels.flatMap((l) => l.attributes[key].data);
+
+      const draftM2M = flatten(draftLabels, 'articles_connection');
+      const draftO2M = flatten(draftLabels, 'one_to_many_articles_connection');
+      const publishedM2M = flatten(publishedLabels, 'articles_connection');
+      const publishedO2M = flatten(publishedLabels, 'one_to_many_articles_connection');
+
+      // Sanity: relations actually populated, otherwise `every` would pass vacuously.
+      expect(draftM2M.length).toBeGreaterThan(0);
+      expect(draftO2M.length).toBeGreaterThan(0);
+      expect(publishedM2M.length).toBeGreaterThan(0);
+      expect(publishedO2M.length).toBeGreaterThan(0);
+
+      // The actual regression assertion: nested relations must not pick up the
+      // sibling root's status.
+      expect(draftM2M.every((a) => a.attributes.publishedAt === null)).toBe(true);
+      expect(draftO2M.every((a) => a.attributes.publishedAt === null)).toBe(true);
+      expect(publishedM2M.every((a) => a.attributes.publishedAt !== null)).toBe(true);
+      expect(publishedO2M.every((a) => a.attributes.publishedAt !== null)).toBe(true);
     });
   });
 });

@@ -1,25 +1,22 @@
 import * as React from 'react';
 
-import { Box, Button, ContentLayout, Flex, HeaderLayout, Main } from '@strapi/design-system';
-import { Link } from '@strapi/design-system/v2';
-import {
-  LoadingIndicatorPage,
-  SettingsPageTitle,
-  useAPIErrorHandler,
-  useNotification,
-  useOverlayBlocker,
-  useTracking,
-  translatedErrors,
-  useRBAC,
-} from '@strapi/helper-plugin';
-import { ArrowLeft } from '@strapi/icons';
+import { Box, Button, Flex, Main } from '@strapi/design-system';
+import { Check } from '@strapi/icons';
 import { Formik, FormikHelpers } from 'formik';
 import { useIntl } from 'react-intl';
-import { NavLink, Redirect, useRouteMatch } from 'react-router-dom';
+import { Navigate, useMatch } from 'react-router-dom';
 import * as yup from 'yup';
 
+import { SUPER_ADMIN_CODE } from '../../../../../../shared/utils/super-admin';
+import { Layouts } from '../../../../components/Layouts/Layout';
+import { Page } from '../../../../components/PageHelpers';
 import { useTypedSelector } from '../../../../core/store/hooks';
+import { useAuth } from '../../../../features/Auth';
+import { BackButton } from '../../../../features/BackButton';
+import { useNotification } from '../../../../features/Notifications';
+import { useTracking } from '../../../../features/Tracking';
 import { useAdminRoles } from '../../../../hooks/useAdminRoles';
+import { useAPIErrorHandler } from '../../../../hooks/useAPIErrorHandler';
 import {
   useGetRolePermissionLayoutQuery,
   useGetRolePermissionsQuery,
@@ -27,12 +24,14 @@ import {
   useUpdateRolePermissionsMutation,
 } from '../../../../services/users';
 import { isBaseQueryError } from '../../../../utils/baseQuery';
+import { translatedErrors } from '../../../../utils/translatedErrors';
 
 import { Permissions, PermissionsAPI } from './components/Permissions';
 import { RoleForm } from './components/RoleForm';
+import { isPermissionsCeilingError } from './utils/isPermissionsCeilingError';
 
 const EDIT_ROLE_SCHEMA = yup.object().shape({
-  name: yup.string().required(translatedErrors.required),
+  name: yup.string().required(translatedErrors.required.id),
   description: yup.string().optional(),
 });
 
@@ -45,17 +44,26 @@ interface EditRoleFormValues {
 }
 
 const EditPage = () => {
-  const toggleNotification = useNotification();
+  const { toggleNotification } = useNotification();
   const { formatMessage } = useIntl();
-  const match = useRouteMatch<{ id: string }>('/settings/roles/:id');
+  const match = useMatch('/settings/roles/:id');
   const id = match?.params.id;
   const permissionsRef = React.useRef<PermissionsAPI>(null);
-  const { lockApp, unlockApp } = useOverlayBlocker();
+  const [hasLocaleValidationErrors, setHasLocaleValidationErrors] = React.useState(false);
   const { trackUsage } = useTracking();
   const {
     _unstableFormatAPIError: formatAPIError,
     _unstableFormatValidationErrors: formatValidationErrors,
   } = useAPIErrorHandler();
+
+  /**
+   * An admin cannot grant a permission they do not hold themselves, so the permissions
+   * tree is restricted to the current user's own permissions unless they are a super admin.
+   */
+  const currentUserPermissions = useAuth('EditPage', (state) => state.permissions);
+  const currentUser = useAuth('EditPage', (state) => state.user);
+  const isCurrentUserSuperAdmin =
+    currentUser?.roles.some((role) => role.code === SUPER_ADMIN_CODE) ?? false;
 
   const { isLoading: isLoadingPermissionsLayout, data: permissionsLayout } =
     useGetRolePermissionLayoutQuery({
@@ -93,41 +101,27 @@ const EditPage = () => {
   const [updateRolePermissions] = useUpdateRolePermissionsMutation();
 
   if (!id) {
-    return <Redirect to="/settings/roles" />;
+    return <Navigate to="/settings/roles" />;
   }
 
   const handleEditRoleSubmit = async (
     data: EditRoleFormValues,
     formik: FormikHelpers<EditRoleFormValues>
   ) => {
-    try {
-      // @ts-expect-error – This will be fixed in V5
-      lockApp();
+    // Re-check via ref on submit: state may lag behind the latest matrix edits when save is clicked quickly
+    if (permissionsRef.current?.hasLocaleValidationErrors()) {
+      return;
+    }
 
+    try {
       const { permissionsToSend, didUpdateConditions } =
         permissionsRef.current?.getPermissions() ?? {};
 
-      const res = await updateRole({
-        id,
-        ...data,
-      });
-
-      if ('error' in res) {
-        if (isBaseQueryError(res.error) && res.error.name === 'ValidationError') {
-          formik.setErrors(formatValidationErrors(res.error));
-        } else {
-          toggleNotification({
-            type: 'warning',
-            message: formatAPIError(res.error),
-          });
-        }
-
-        return;
-      }
-
-      if (role.code !== 'strapi-super-admin' && permissionsToSend) {
+      // Save the permissions first: when the server rejects them (for instance a permission the
+      // user does not hold), the name and description are not saved either
+      if (role.code !== SUPER_ADMIN_CODE && permissionsToSend) {
         const updateRes = await updateRolePermissions({
-          id: res.data.id,
+          id,
           permissions: permissionsToSend,
         });
 
@@ -136,8 +130,14 @@ const EditPage = () => {
             formik.setErrors(formatValidationErrors(updateRes.error));
           } else {
             toggleNotification({
-              type: 'warning',
-              message: formatAPIError(updateRes.error),
+              type: 'danger',
+              message: isPermissionsCeilingError(updateRes.error)
+                ? formatMessage({
+                    id: 'Settings.permissions.cannot-grant-unheld.error',
+                    defaultMessage:
+                      "Some permissions could not be saved because you don't have them yourself.",
+                  })
+                : formatAPIError(updateRes.error),
             });
           }
 
@@ -149,30 +149,56 @@ const EditPage = () => {
         }
       }
 
+      const res = await updateRole({
+        id,
+        ...data,
+      });
+
+      if ('error' in res) {
+        if (isBaseQueryError(res.error) && res.error.name === 'ValidationError') {
+          formik.setErrors(formatValidationErrors(res.error));
+        } else {
+          toggleNotification({
+            type: 'danger',
+            message: formatAPIError(res.error),
+          });
+        }
+
+        return;
+      }
+
       permissionsRef.current?.setFormAfterSubmit();
 
       await refetchRole();
 
       toggleNotification({
         type: 'success',
-        message: { id: 'notification.success.saved' },
+        message: formatMessage({ id: 'notification.success.saved' }),
       });
-    } catch (error) {
+    } catch {
       toggleNotification({
-        type: 'warning',
-        message: { id: 'notification.error' },
+        type: 'danger',
+        message: formatMessage({ id: 'notification.error', defaultMessage: 'An error occurred' }),
       });
-    } finally {
-      // @ts-expect-error – This will be fixed in V5
-      unlockApp();
     }
   };
 
-  const isFormDisabled = !isRoleLoading && role.code === 'strapi-super-admin';
+  const isFormDisabled = !isRoleLoading && role.code === SUPER_ADMIN_CODE;
+
+  if (isLoadingPermissionsLayout || isRoleLoading || isLoadingPermissions || !permissionsLayout) {
+    return <Page.Loading />;
+  }
 
   return (
     <Main>
-      <SettingsPageTitle name="Roles" />
+      <Page.Title>
+        {formatMessage(
+          { id: 'Settings.PageTitle', defaultMessage: 'Settings - {name}' },
+          {
+            name: 'Roles',
+          }
+        )}
+      </Page.Title>
       <Formik
         enableReinitialize
         initialValues={
@@ -187,21 +213,20 @@ const EditPage = () => {
       >
         {({ handleSubmit, values, errors, handleChange, handleBlur, isSubmitting }) => (
           <form onSubmit={handleSubmit}>
-            <HeaderLayout
+            <Layouts.Header
               primaryAction={
-                <Flex gap={2}>
-                  <Button
-                    type="submit"
-                    disabled={role.code === 'strapi-super-admin'}
-                    loading={isSubmitting}
-                    size="L"
-                  >
-                    {formatMessage({
-                      id: 'global.save',
-                      defaultMessage: 'Save',
-                    })}
-                  </Button>
-                </Flex>
+                <Button
+                  type="submit"
+                  startIcon={<Check />}
+                  disabled={role.code === SUPER_ADMIN_CODE || hasLocaleValidationErrors}
+                  loading={isSubmitting}
+                  fullWidth
+                >
+                  {formatMessage({
+                    id: 'global.save',
+                    defaultMessage: 'Save',
+                  })}
+                </Button>
               }
               title={formatMessage({
                 id: 'Settings.roles.edit.title',
@@ -212,16 +237,13 @@ const EditPage = () => {
                 defaultMessage: 'Define the rights given to the role',
               })}
               navigationAction={
-                // @ts-expect-error – the props from the component passed as `as` are not correctly inferred.
-                <Link as={NavLink} startIcon={<ArrowLeft />} to="/settings/roles">
-                  {formatMessage({
-                    id: 'global.back',
-                    defaultMessage: 'Back',
-                  })}
-                </Link>
+                // The back link for mobile works differently; it is placed higher up in the DOM.
+                <Box display={{ initial: 'none', medium: 'block' }}>
+                  <BackButton fallback="../roles" />
+                </Box>
               }
             />
-            <ContentLayout>
+            <Layouts.Content>
               <Flex direction="column" alignItems="stretch" gap={6}>
                 <RoleForm
                   disabled={isFormDisabled}
@@ -231,25 +253,19 @@ const EditPage = () => {
                   onBlur={handleBlur}
                   role={role}
                 />
-                {!isLoadingPermissionsLayout &&
-                !isRoleLoading &&
-                !isLoadingPermissions &&
-                permissionsLayout ? (
-                  <Box shadow="filterShadow" hasRadius>
-                    <Permissions
-                      isFormDisabled={isFormDisabled}
-                      permissions={permissions}
-                      ref={permissionsRef}
-                      layout={permissionsLayout}
-                    />
-                  </Box>
-                ) : (
-                  <Box background="neutral0" padding={6} shadow="filterShadow" hasRadius>
-                    <LoadingIndicatorPage />
-                  </Box>
-                )}
+                <Box shadow="filterShadow" hasRadius>
+                  <Permissions
+                    isFormDisabled={isFormDisabled}
+                    onLocaleValidationChange={setHasLocaleValidationErrors}
+                    permissions={permissions}
+                    permissionsAreStored
+                    ref={permissionsRef}
+                    layout={permissionsLayout}
+                    userPermissions={isCurrentUserSuperAdmin ? undefined : currentUserPermissions}
+                  />
+                </Box>
               </Flex>
-            </ContentLayout>
+            </Layouts.Content>
           </form>
         )}
       </Formik>
@@ -258,22 +274,15 @@ const EditPage = () => {
 };
 
 const ProtectedEditPage = () => {
-  const permissions = useTypedSelector((state) => state.admin_app.permissions.settings?.roles);
+  const permissions = useTypedSelector(
+    (state) => state.admin_app.permissions.settings?.roles.update
+  );
 
-  const {
-    isLoading,
-    allowedActions: { canRead, canUpdate },
-  } = useRBAC(permissions);
-
-  if (isLoading) {
-    return <LoadingIndicatorPage />;
-  }
-
-  if (!canRead && !canUpdate) {
-    return <Redirect to="/" />;
-  }
-
-  return <EditPage />;
+  return (
+    <Page.Protect permissions={permissions}>
+      <EditPage />
+    </Page.Protect>
+  );
 };
 
 export { EditPage, ProtectedEditPage };

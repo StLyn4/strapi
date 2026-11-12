@@ -7,7 +7,10 @@ import Dialect from '../dialect';
 import SqliteSchemaInspector from './schema-inspector';
 import type { Database } from '../..';
 
-const UNSUPPORTED_OPERATORS = ['$jsonSupersetOf'];
+const UNSUPPORTED_OPERATORS = new Set(['$jsonSupersetOf']);
+
+/** SQLite compound SELECT limit (SQLITE_MAX_COMPOUND_SELECT); Knex batch insert uses UNION ALL per row. */
+const SQLITE_BATCH_INSERT_SIZE = 500;
 
 export default class SqliteDialect extends Dialect {
   schemaInspector: SqliteSchemaInspector;
@@ -18,8 +21,13 @@ export default class SqliteDialect extends Dialect {
     this.schemaInspector = new SqliteSchemaInspector(db);
   }
 
-  configure() {
-    const connection = this.db.config.connection.connection as Knex.Sqlite3ConnectionConfig;
+  getBatchInsertSize(): number {
+    return SQLITE_BATCH_INSERT_SIZE;
+  }
+
+  configure(conn?: Knex.Sqlite3ConnectionConfig) {
+    const connection =
+      conn || (this.db.config.connection.connection as Knex.Sqlite3ConnectionConfig);
     if (typeof connection !== 'string') {
       connection.filename = path.resolve(connection.filename);
     }
@@ -33,12 +41,31 @@ export default class SqliteDialect extends Dialect {
     return true;
   }
 
-  async initialize() {
-    await this.db.connection.raw('pragma foreign_keys = on');
+  async initialize(nativeConnection: unknown) {
+    await this.db.connection.raw('pragma foreign_keys = on').connection(nativeConnection);
   }
 
   canAlterConstraints() {
     return false;
+  }
+
+  /**
+   * SQLite foreign keys are unnamed (declared inline on the table), so only
+   * indexes need dropping. Queries run on `trx`: SQLite pools hold a single
+   * connection, which the migration transaction already owns.
+   */
+  async dropSchemaObject(
+    trx: Knex,
+    { table, name }: { table: string; name: string }
+  ): Promise<boolean> {
+    const indexes: Array<{ name: string }> = await trx.raw('pragma index_list(??)', [table]);
+
+    if (!indexes.some((index) => index.name === name)) {
+      return false;
+    }
+
+    await trx.raw('DROP INDEX ??', [name]);
+    return true;
   }
 
   getSqlType(type: string) {
@@ -60,7 +87,7 @@ export default class SqliteDialect extends Dialect {
   }
 
   supportsOperator(operator: string) {
-    return !UNSUPPORTED_OPERATORS.includes(operator);
+    return !UNSUPPORTED_OPERATORS.has(operator);
   }
 
   async startSchemaUpdate() {

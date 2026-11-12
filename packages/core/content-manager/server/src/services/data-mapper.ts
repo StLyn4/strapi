@@ -1,6 +1,8 @@
-import { pick, getOr } from 'lodash/fp';
+import { pick, get } from 'lodash';
+
 import { contentTypes as contentTypesUtils } from '@strapi/utils';
-import { Attribute, Schema } from '@strapi/types';
+
+import type { Schema, Struct } from '@strapi/types';
 
 const dtoFields = [
   'uid',
@@ -16,7 +18,7 @@ const dtoFields = [
 ];
 
 export default () => ({
-  toContentManagerModel(contentType: Schema.Component) {
+  toContentManagerModel(contentType: Struct.ComponentSchema) {
     return {
       ...contentType,
       apiID: contentType.modelName,
@@ -26,14 +28,17 @@ export default () => ({
           type: 'integer',
         },
         ...formatAttributes(contentType),
+        documentId: {
+          type: 'string',
+        },
       },
     };
   },
 
-  toDto: pick(dtoFields),
+  toDto: <T extends object>(model: T) => pick(model, dtoFields),
 });
 
-const formatAttributes = (contentType: Schema.Component) => {
+const formatAttributes = (contentType: Struct.ComponentSchema) => {
   const { getVisibleAttributes, getTimestamps, getCreatorFields } = contentTypesUtils;
 
   // only get attributes that can be seen in the auto generated Edit view or List view
@@ -54,7 +59,7 @@ const formatAttributes = (contentType: Schema.Component) => {
 };
 
 // FIXME: not needed
-const formatAttribute = (key: any, attribute: Attribute.Any) => {
+const formatAttribute = (key: any, attribute: Schema.Attribute.AnyAttribute) => {
   if (attribute.type === 'relation') {
     return toRelation(attribute);
   }
@@ -63,7 +68,7 @@ const formatAttribute = (key: any, attribute: Attribute.Any) => {
 };
 
 // FIXME: not needed
-const toRelation = (attribute: Attribute.Relation) => {
+const toRelation = (attribute: Schema.Attribute.Relation) => {
   return {
     ...attribute,
     type: 'relation',
@@ -72,5 +77,5 @@ const toRelation = (attribute: Attribute.Relation) => {
   };
 };
 
-const isVisible = (model: Schema.Component): boolean =>
-  getOr(true, 'pluginOptions.content-manager.visible', model) === true;
+const isVisible = (model: Struct.ComponentSchema): boolean =>
+  get(model, 'pluginOptions.content-manager.visible', true) === true;

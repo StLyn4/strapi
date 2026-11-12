@@ -1,4 +1,4 @@
-import { ErrorCode } from '../../types';
+import { ErrorCode } from '../types';
 import { DataTransferError } from './base';
 import { Severity, SeverityKind } from './constants';
 
@@ -12,7 +12,7 @@ export type ProviderErrorDetails<P extends ProviderStep = ProviderStep, U = neve
 export class ProviderError<
   P extends ProviderStep = ProviderStep,
   U = never,
-  T extends ProviderErrorDetails<P, U> = ProviderErrorDetails<P, U>
+  T extends ProviderErrorDetails<P, U> = ProviderErrorDetails<P, U>,
 > extends DataTransferError<T> {
   constructor(severity: Severity, message?: string, details?: T | null) {
     super('provider', severity, message, details);

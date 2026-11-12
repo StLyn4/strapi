@@ -1,17 +1,37 @@
 import _ from 'lodash';
 import type { Context } from 'koa';
-import 'koa-bodyparser';
-
-import { contentTypes } from '@strapi/utils';
-import type { UID } from '@strapi/types';
+import type {} from 'koa-body';
+import type { Internal } from '@strapi/types';
 import { getService } from '../utils';
+import { formatValidationError } from '../utils/errors';
 import {
   validateContentTypeInput,
   validateUpdateContentTypeInput,
   validateKind,
 } from './validation/content-type';
+import { isContentTypeVisible } from '../services/content-types';
 
-const { hasDraftAndPublish } = contentTypes;
+/**
+ * Telemetry uses a bounded HTTP timeout (~1s in the metrics sender); cap how long we defer
+ * dev reload so a stuck client cannot block restart indefinitely.
+ */
+const RELOAD_AFTER_TELEMETRY_MAX_MS = 2500;
+
+const scheduleReloadAfterOutboundTelemetry = (sendPromise: Promise<unknown>): void => {
+  setImmediate(() => {
+    const settled = sendPromise.catch(() => {});
+    Promise.race([
+      settled,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, RELOAD_AFTER_TELEMETRY_MAX_MS);
+      }),
+    ])
+      .catch(() => {})
+      .finally(() => {
+        strapi.reload();
+      });
+  });
+};
 
 export default {
   async getContentTypes(ctx: Context) {
@@ -20,7 +40,7 @@ export default {
     try {
       await validateKind(kind);
     } catch (error) {
-      return ctx.send({ error }, 400);
+      return ctx.send({ error: formatValidationError(error) }, 400);
     }
 
     const contentTypeService = getService('content-types');
@@ -29,10 +49,11 @@ export default {
       .filter(
         (uid) =>
           !kind ||
-          _.get(strapi.contentTypes[uid as UID.ContentType], 'kind', 'collectionType') === kind
+          _.get(strapi.contentTypes[uid as Internal.UID.ContentType], 'kind', 'collectionType') ===
+            kind
       )
       .map((uid) =>
-        contentTypeService.formatContentType(strapi.contentTypes[uid as UID.ContentType])
+        contentTypeService.formatContentType(strapi.contentTypes[uid as Internal.UID.ContentType])
       );
 
     ctx.send({
@@ -49,18 +70,22 @@ export default {
       return ctx.send({ error: 'contentType.notFound' }, 404);
     }
 
+    if (!isContentTypeVisible(contentType)) {
+      return ctx.send({ error: 'contentType.notFound' }, 404);
+    }
+
     const contentTypeService = getService('content-types');
 
     ctx.send({ data: contentTypeService.formatContentType(contentType) });
   },
 
   async createContentType(ctx: Context) {
-    const { body } = ctx.request;
+    const body = ctx.request.body as any;
 
     try {
       await validateContentTypeInput(body);
     } catch (error) {
-      return ctx.send({ error }, 400);
+      return ctx.send({ error: formatValidationError(error) }, 400);
     }
 
     try {
@@ -76,31 +101,34 @@ export default {
       const metricsPayload = {
         eventProperties: {
           kind: contentType.kind,
-          hasDraftAndPublish: hasDraftAndPublish(contentType.schema),
         },
       };
 
-      if (_.isEmpty(strapi.api)) {
-        await strapi.telemetry.send('didCreateFirstContentType', metricsPayload);
-      } else {
-        await strapi.telemetry.send('didCreateContentType', metricsPayload);
-      }
+      const telemetryPromise = _.isEmpty(strapi.apis)
+        ? strapi.telemetry.send('didCreateFirstContentType', metricsPayload)
+        : strapi.telemetry.send('didCreateContentType', metricsPayload);
 
-      setImmediate(() => strapi.reload());
+      scheduleReloadAfterOutboundTelemetry(telemetryPromise);
 
       ctx.send({ data: { uid: contentType.uid } }, 201);
     } catch (err) {
       strapi.log.error(err);
-      await strapi.telemetry.send('didNotCreateContentType', {
-        eventProperties: { error: (err as Error).message || err },
-      });
+
+      // The server will not restart, so hand file changes back to the watcher
+      strapi.reload.resumeWatching();
+
+      strapi.telemetry
+        .send('didNotCreateContentType', {
+          eventProperties: { error: (err as Error).message || err },
+        })
+        .catch(() => {});
       ctx.send({ error: (err as Error).message || 'Unknown error' }, 400);
     }
   },
 
   async updateContentType(ctx: Context) {
     const { uid } = ctx.params;
-    const { body } = ctx.request;
+    const body = ctx.request.body as any;
 
     if (!_.has(strapi.contentTypes, uid)) {
       return ctx.send({ error: 'contentType.notFound' }, 404);
@@ -109,7 +137,7 @@ export default {
     try {
       await validateUpdateContentTypeInput(body);
     } catch (error) {
-      return ctx.send({ error }, 400);
+      return ctx.send({ error: formatValidationError(error) }, 400);
     }
 
     try {
@@ -127,6 +155,10 @@ export default {
       ctx.send({ data: { uid: component.uid } }, 201);
     } catch (error) {
       strapi.log.error(error);
+
+      // The server will not restart, so hand file changes back to the watcher
+      strapi.reload.resumeWatching();
+
       ctx.send({ error: (error as Error)?.message || 'Unknown error' }, 400);
     }
   },
@@ -150,6 +182,10 @@ export default {
       ctx.send({ data: { uid: component.uid } });
     } catch (error) {
       strapi.log.error(error);
+
+      // The server will not restart, so hand file changes back to the watcher
+      strapi.reload.resumeWatching();
+
       ctx.send({ error: (error as Error)?.message || 'Unknown error' }, 400);
     }
   },

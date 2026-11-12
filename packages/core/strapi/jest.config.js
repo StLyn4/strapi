@@ -6,5 +6,8 @@ module.exports = {
     '^.+\\.ts$': ['@swc/jest'],
   },
   testMatch: ['<rootDir>/**/*.test.ts'],
-  displayName: 'Core Strapi',
+  displayName: 'Strapi',
+  moduleNameMapper: {
+    '^inquirer$': '<rootDir>/src/test/mocks/inquirer.ts',
+  },
 };

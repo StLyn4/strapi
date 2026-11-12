@@ -1,57 +1,55 @@
-import { setCreatorFields, errors } from '@strapi/utils';
+import { setCreatorFields, errors, emitAudit } from '@strapi/utils';
 
-import type { LoadedStrapi, EntityService, UID, Schema } from '@strapi/types';
+import type { Core, Struct, Data } from '@strapi/types';
 
-import _ from 'lodash/fp';
-
-import { ALLOWED_WEBHOOK_EVENTS, RELEASE_ACTION_MODEL_UID, RELEASE_MODEL_UID } from '../constants';
+import {
+  ALLOWED_WEBHOOK_EVENTS,
+  AUDITED_EVENTS,
+  RELEASE_ACTION_MODEL_UID,
+  RELEASE_MODEL_UID,
+} from '../constants';
+import { RELEASE_STATUSES } from '../../../shared/constants';
+import type { ReleaseFailureReason, ReleaseStatus } from '../../../shared/constants';
+import type { ReleaseAction } from '../../../shared/contracts/release-actions';
 import type {
   GetReleases,
   CreateRelease,
+  CreateReleaseFromSkippedEntries,
   UpdateRelease,
   PublishRelease,
   GetRelease,
   Release,
   DeleteRelease,
-  GetContentTypeEntryReleases,
 } from '../../../shared/contracts/releases';
-import type {
-  CreateReleaseAction,
-  GetReleaseActions,
-  ReleaseAction,
-  UpdateReleaseAction,
-  DeleteReleaseAction,
-  ReleaseActionGroupBy,
-} from '../../../shared/contracts/release-actions';
-import type { Entity, UserInfo } from '../../../shared/types';
-import { getService, getPopulatedEntry, getEntryValidStatus } from '../utils';
+import type { UserInfo } from '../../../shared/types';
+import {
+  getErrorName,
+  getService,
+  isFailedBeforeUpgrade,
+  isReleaseBlocked,
+  toError,
+  lockPlannedRelease,
+  lockRelease,
+  NOT_READY_ACTION_WHERE,
+} from '../utils';
+import { emitAuditOnCommit, getReleaseChanges } from '../audit-logs';
+import { createReleaseRun } from './release-run';
+import type { PublishTrigger, RunTotals } from './release-run';
 
-export interface Locale extends Entity {
-  name: string;
-  code: string;
-}
+// What reports a frozen release: its run, or the overdue sweep for a release that never ran
+type ReportTrigger = PublishTrigger | 'sweep';
 
-type LocaleDictionary = {
-  [key: Locale['code']]: Pick<Locale, 'name' | 'code'>;
-};
+type ReportedRelease = Pick<Release, 'id' | 'name' | 'releaseCondition' | 'failureReason'> &
+  RunTotals;
 
-const getGroupName = (queryValue?: ReleaseActionGroupBy) => {
-  switch (queryValue) {
-    case 'contentType':
-      return 'contentType.displayName';
-    case 'action':
-      return 'type';
-    case 'locale':
-      return _.getOr('No locale', 'locale.name');
-    default:
-      return 'contentType.displayName';
-  }
-};
-
-const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
+const createReleaseService = ({ strapi }: { strapi: Core.Strapi }) => {
   const dispatchWebhook = (
     event: string,
-    { isPublished, release, error }: { isPublished: boolean; release?: any; error?: unknown }
+    {
+      isPublished,
+      release,
+      error,
+    }: { isPublished: boolean; release: Pick<Release, 'id' | 'name'>; error?: unknown }
   ) => {
     strapi.eventHub.emit(event, {
       isPublished,
@@ -60,297 +58,356 @@ const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
     });
   };
 
-  const publishSingleTypeAction = async (
-    uid: UID.ContentType,
-    actionType: 'publish' | 'unpublish',
-    entryId: Entity['id']
+  const getRunEventProperties = (release: ReportedRelease, trigger: ReportTrigger) => ({
+    releaseCondition: release.releaseCondition,
+    // A release the sweep froze was scheduled: its failure reason says it never ran
+    trigger: trigger === 'sweep' ? 'scheduled' : trigger,
+    totalEntries:
+      release.totalPublishedEntries + release.totalUnpublishedEntries + release.totalSkippedEntries,
+    totalPublishedEntries: release.totalPublishedEntries,
+    totalUnpublishedEntries: release.totalUnpublishedEntries,
+    totalSkippedEntries: release.totalSkippedEntries,
+  });
+
+  // The webhook, telemetry and audit event of a release that froze as failed, so they always agree
+  const reportFailedRun = async (
+    release: ReportedRelease,
+    error: Error,
+    { trigger }: { trigger: ReportTrigger }
   ) => {
-    const entityManagerService = strapi.plugin('content-manager').service('entity-manager');
-    const populateBuilderService = strapi.plugin('content-manager').service('populate-builder');
-
-    // @ts-expect-error - populateBuilderService should be a function but is returning service
-    const populate = await populateBuilderService(uid).populateDeep(Infinity).build();
-
-    const entry = await strapi.entityService.findOne(uid, entryId, { populate });
-
-    try {
-      if (actionType === 'publish') {
-        await entityManagerService.publish(entry, uid);
-      } else {
-        await entityManagerService.unpublish(entry, uid);
-      }
-    } catch (error) {
-      if (
-        error instanceof errors.ApplicationError &&
-        (error.message === 'already.published' || error.message === 'already.draft')
-      ) {
-        // We don't want throw an error if the entry is already published or draft
-      } else {
-        throw error;
-      }
-    }
-  };
-
-  const publishCollectionTypeAction = async (
-    uid: UID.ContentType,
-    entriesToPublishIds: Array<Entity['id']>,
-    entriestoUnpublishIds: Array<Entity['id']>
-  ) => {
-    const entityManagerService = strapi.plugin('content-manager').service('entity-manager');
-    const populateBuilderService = strapi.plugin('content-manager').service('populate-builder');
-
-    // @ts-expect-error - populateBuilderService should be a function but is returning service
-    const populate = await populateBuilderService(uid).populateDeep(Infinity).build();
-
-    /**
-     * We need to get the populate entries to be able to publish without errors on components/relations/dynamicZones
-     * Considering that populate doesn't work well with morph relations we can't get the entries from the Release model
-     * So, we need to fetch them manually
-     */
-    const entriesToPublish = (await strapi.entityService.findMany(uid, {
-      filters: {
-        id: {
-          $in: entriesToPublishIds,
-        },
-      },
-      populate,
-    })) as Entity[];
-
-    const entriesToUnpublish = (await strapi.entityService.findMany(uid, {
-      filters: {
-        id: {
-          $in: entriestoUnpublishIds,
-        },
-      },
-      populate,
-    })) as Entity[];
-
-    if (entriesToPublish.length > 0) {
-      await entityManagerService.publishMany(entriesToPublish, uid);
-    }
-
-    if (entriesToUnpublish.length > 0) {
-      await entityManagerService.unpublishMany(entriesToUnpublish, uid);
-    }
-  };
-
-  /**
-   * Given a release id, it returns the actions formatted ready to be used to publish them.
-   * First we separate actions by collectiontType and singleType,
-   * Then, we split the collectionType based on the action type (publish/unpublish)
-   */
-  const getFormattedActions = async (releaseId: Release['id']) => {
-    const actions = await strapi.db.query(RELEASE_ACTION_MODEL_UID).findMany({
-      where: {
-        release: {
-          id: releaseId,
-        },
-      },
-      populate: {
-        entry: {
-          fields: ['id'],
-        },
+    dispatchWebhook(ALLOWED_WEBHOOK_EVENTS.RELEASES_PUBLISH, {
+      isPublished: false,
+      error,
+      release,
+    });
+    strapi.telemetry.send('didPublishContentRelease', {
+      eventProperties: {
+        ...getRunEventProperties(release, trigger),
+        status: 'failed',
+        // A run that failed stores no reason: only a release that never ran has one
+        failureReason: release.failureReason ?? 'run_failed',
       },
     });
 
-    if (actions.length === 0) {
-      throw new errors.ValidationError('No entries to publish');
+    await emitAudit({ strapi }, AUDITED_EVENTS.RELEASE_TRIGGER, {
+      releaseId: release.id,
+      name: release.name,
+      outcome: 'failure',
+      reason: error.name,
+    });
+  };
+
+  // The webhook, telemetry and audit event of a release that froze as done or partial
+  const reportReleasedRun = async (
+    release: ReportedRelease & Pick<Release, 'status'>,
+    { trigger }: { trigger: ReportTrigger }
+  ) => {
+    dispatchWebhook(ALLOWED_WEBHOOK_EVENTS.RELEASES_PUBLISH, { isPublished: true, release });
+
+    // The sweep only freezes as done an empty release, which published nothing
+    if (trigger !== 'sweep') {
+      strapi.telemetry.send('didPublishContentRelease', {
+        eventProperties: { ...getRunEventProperties(release, trigger), status: release.status },
+      });
     }
 
-    /**
-     * We separate publish and unpublish actions, grouping them by contentType and extracting only their IDs. Then we can fetch more data for each entry
-     * We need to separate collectionTypes from singleTypes because findMany work as findOne for singleTypes and publishMany can't be used for singleTypes
-     */
-    const collectionTypeActions: {
-      [key: UID.ContentType]: {
-        entriesToPublishIds: ReleaseAction['entry']['id'][];
-        entriesToUnpublishIds: ReleaseAction['entry']['id'][];
-      };
-    } = {};
-    const singleTypeActions: {
-      uid: UID.ContentType;
-      id: ReleaseAction['entry']['id'];
-      action: ReleaseAction['type'];
-    }[] = [];
+    // The audit's `failed` is the release's skipped entries
+    await emitAudit({ strapi }, AUDITED_EVENTS.RELEASE_TRIGGER, {
+      releaseId: release.id,
+      name: release.name,
+      outcome: release.status === 'done' ? 'success' : 'partial',
+      published: release.totalPublishedEntries,
+      unpublished: release.totalUnpublishedEntries,
+      failed: release.totalSkippedEntries,
+    });
+  };
 
-    for (const action of actions) {
-      const contentTypeUid = action.contentType;
+  // The checks every new release goes through, before anything is written
+  const validateNewRelease = async (
+    releaseData: CreateRelease.Request['body'],
+    { user }: { user: UserInfo }
+  ) => {
+    const releaseWithCreatorFields = await setCreatorFields({ user })(releaseData);
 
-      if (strapi.contentTypes[contentTypeUid].kind === 'collectionType') {
-        if (!collectionTypeActions[contentTypeUid]) {
-          collectionTypeActions[contentTypeUid] = {
-            entriesToPublishIds: [],
-            entriesToUnpublishIds: [],
-          };
-        }
+    const {
+      validatePendingReleasesLimit,
+      validateUniqueNameForPendingRelease,
+      validateScheduledAtIsLaterThanNow,
+    } = getService('release-validation', { strapi });
 
-        if (action.type === 'publish') {
-          collectionTypeActions[contentTypeUid].entriesToPublishIds.push(action.entry.id);
-        } else {
-          collectionTypeActions[contentTypeUid].entriesToUnpublishIds.push(action.entry.id);
-        }
-      } else {
-        singleTypeActions.push({
-          uid: contentTypeUid,
-          action: action.type,
-          id: action.entry.id,
-        });
+    await Promise.all([
+      validatePendingReleasesLimit(),
+      validateUniqueNameForPendingRelease(releaseWithCreatorFields.name),
+      validateScheduledAtIsLaterThanNow(releaseWithCreatorFields.scheduledAt),
+    ]);
+
+    return releaseWithCreatorFields;
+  };
+
+  // Takes validated data with creator fields. In a transaction, the audit waits for the commit.
+  const insertRelease = async (releaseData: CreateRelease.Request['body']): Promise<Release> => {
+    const release: Release = await strapi.db.query(RELEASE_MODEL_UID).create({
+      data: {
+        ...releaseData,
+        status: 'empty',
+      },
+    });
+
+    // Audited before scheduling: a scheduling failure shouldn't leave the write unrecorded
+    await emitAuditOnCommit({ strapi }, AUDITED_EVENTS.RELEASE_CREATE, {
+      releaseId: release.id,
+      name: release.name,
+      ...(release.scheduledAt && {
+        scheduledAt: release.scheduledAt,
+        timezone: release.timezone,
+      }),
+      releaseCondition: release.releaseCondition,
+    });
+
+    return release;
+  };
+
+  const scheduleCreatedRelease = async (
+    release: Release,
+    { fromSkipped }: { fromSkipped: boolean }
+  ) => {
+    if (release.scheduledAt) {
+      await getService('scheduling', { strapi }).set(release.id, release.scheduledAt);
+    }
+
+    strapi.telemetry.send('didCreateContentRelease', {
+      eventProperties: {
+        releaseCondition: release.releaseCondition,
+        isScheduled: Boolean(release.scheduledAt),
+        fromSkipped,
+      },
+    });
+
+    return release;
+  };
+
+  // Under the release lock, so the counts are those of the last committed change and a status
+  // never lands after a newer one
+  const updateReleaseStatus = async (releaseId: Release['id']) => {
+    const releaseActionService = getService('release-action', { strapi });
+
+    await strapi.db.transaction(async () => {
+      const release = await lockRelease(releaseId, ['releaseCondition', 'releasedAt', 'status'], {
+        strapi,
+      });
+
+      if (!release || release.releasedAt || isFailedBeforeUpgrade(release)) {
+        return;
       }
-    }
 
-    return { collectionTypeActions, singleTypeActions };
+      const [totalActions, invalidActions] = await Promise.all([
+        releaseActionService.countActions({
+          filters: {
+            release: releaseId,
+          },
+        }),
+        // Unpublish actions are always publishable, whatever validity an edit stored on them
+        releaseActionService.countActions({
+          filters: { release: releaseId, ...NOT_READY_ACTION_WHERE },
+        }),
+      ]);
+
+      let status: Release['status'] = 'empty';
+
+      if (totalActions > 0) {
+        status = isReleaseBlocked(release.releaseCondition, {
+          total: totalActions,
+          notPublishable: invalidActions,
+        })
+          ? 'blocked'
+          : 'ready';
+      }
+
+      await strapi.db
+        .query(RELEASE_MODEL_UID)
+        .update({ where: { id: releaseId }, data: { status } });
+    });
+  };
+
+  const { runLocked } = createReleaseRun({ strapi, updateReleaseStatus });
+
+  /**
+   * Each database sorts nulls its own way: the unscheduled releases fill the pages first, so they
+   * come first whatever the direction, then the scheduled ones in the requested order
+   */
+  const findPageByScheduledAt = async (
+    { where, orderBy, ...params }: { where?: object; orderBy?: object | object[] },
+    { page = 1, pageSize = 10 }: { page?: number; pageSize?: number }
+  ) => {
+    const query = strapi.db.query(RELEASE_MODEL_UID);
+    // Ties, and the unscheduled releases, go most recently updated first: the id keeps one order
+    // from page to page
+    const order = [
+      ...(Array.isArray(orderBy) ? orderBy : [orderBy]),
+      { updatedAt: 'desc' },
+      { id: 'desc' },
+    ];
+    const withSchedule = (isScheduled: boolean) => ({
+      $and: [...(where ? [where] : []), { scheduledAt: { $notNull: isScheduled } }],
+    });
+
+    const [unscheduledCount, scheduledCount] = await Promise.all([
+      query.count({ where: withSchedule(false) }),
+      query.count({ where: withSchedule(true) }),
+    ]);
+    const offset = (page - 1) * pageSize;
+    const unscheduledLimit = Math.min(Math.max(unscheduledCount - offset, 0), pageSize);
+    const scheduledLimit = pageSize - unscheduledLimit;
+
+    const [unscheduled, scheduled] = await Promise.all([
+      unscheduledLimit > 0
+        ? query.findMany({
+            ...params,
+            where: withSchedule(false),
+            orderBy: order,
+            offset,
+            limit: unscheduledLimit,
+          })
+        : [],
+      scheduledLimit > 0
+        ? query.findMany({
+            ...params,
+            where: withSchedule(true),
+            orderBy: order,
+            offset: Math.max(offset - unscheduledCount, 0),
+            limit: scheduledLimit,
+          })
+        : [],
+    ]);
+    const total = unscheduledCount + scheduledCount;
+
+    return {
+      results: [...unscheduled, ...scheduled],
+      pagination: { page, pageSize, pageCount: Math.ceil(total / pageSize), total },
+    };
   };
 
   return {
     async create(releaseData: CreateRelease.Request['body'], { user }: { user: UserInfo }) {
-      const releaseWithCreatorFields = await setCreatorFields({ user })(releaseData);
+      const release = await insertRelease(await validateNewRelease(releaseData, { user }));
 
-      const {
-        validatePendingReleasesLimit,
-        validateUniqueNameForPendingRelease,
-        validateScheduledAtIsLaterThanNow,
-      } = getService('release-validation', { strapi });
+      return scheduleCreatedRelease(release, { fromSkipped: false });
+    },
 
-      await Promise.all([
-        validatePendingReleasesLimit(),
-        validateUniqueNameForPendingRelease(releaseWithCreatorFields.name),
-        validateScheduledAtIsLaterThanNow(releaseWithCreatorFields.scheduledAt),
-      ]);
+    /**
+     * Creates a release with the skipped entries of a partial or failed release (only
+     * `actionIds`, if given), with how many it got. The source release is left untouched.
+     */
+    async createFromSkippedEntries(
+      releaseId: CreateReleaseFromSkippedEntries.Request['params']['id'],
+      { actionIds, ...releaseData }: CreateReleaseFromSkippedEntries.Request['body'],
+      { user }: { user: UserInfo }
+    ) {
+      const sourceRelease: Pick<Release, 'id' | 'releasedAt' | 'status' | 'failureReason'> | null =
+        await strapi.db.query(RELEASE_MODEL_UID).findOne({
+          where: { id: releaseId },
+          select: ['id', 'releasedAt', 'status', 'failureReason'],
+        });
 
-      const release = await strapi.entityService.create(RELEASE_MODEL_UID, {
-        data: {
-          ...releaseWithCreatorFields,
-          status: 'empty',
-        },
-      });
-
-      if (releaseWithCreatorFields.scheduledAt) {
-        const schedulingService = getService('scheduling', { strapi });
-
-        await schedulingService.set(release.id, release.scheduledAt);
+      if (!sourceRelease) {
+        throw new errors.NotFoundError(`No release found for id ${releaseId}`);
       }
 
-      strapi.telemetry.send('didCreateContentRelease');
+      if (!sourceRelease.releasedAt) {
+        throw new errors.ValidationError('Release not published yet');
+      }
 
-      return release;
+      if (sourceRelease.status !== 'partial' && sourceRelease.status !== 'failed') {
+        throw new errors.ValidationError('Release has no skipped entries');
+      }
+
+      // The old run recorded nothing, so some of its entries may already be live
+      if (sourceRelease.failureReason === 'failed_before_upgrade') {
+        throw new errors.ValidationError(
+          'Release failed before the upgrade, so its skipped entries are unknown'
+        );
+      }
+
+      const releaseWithCreatorFields = await validateNewRelease(releaseData, { user });
+
+      const releaseActionService = getService('release-action', { strapi });
+      // Read outside the transaction, so reading drafts doesn't hold it open
+      const prepared = await releaseActionService.prepareSkippedActions(
+        sourceRelease.id,
+        actionIds
+      );
+
+      if (prepared.length === 0) {
+        throw new errors.ValidationError(
+          actionIds
+            ? 'The requested entries can no longer be released'
+            : 'Release has no skipped entries'
+        );
+      }
+
+      const release: Release = await strapi.db.transaction(async () => {
+        const createdRelease = await insertRelease(releaseWithCreatorFields);
+        await releaseActionService.createPrepared(createdRelease.id, prepared);
+
+        return strapi.db.query(RELEASE_MODEL_UID).findOne({ where: { id: createdRelease.id } });
+      });
+
+      return {
+        release: await scheduleCreatedRelease(release, { fromSkipped: true }),
+        actionsCount: prepared.length,
+      };
     },
 
     async findOne(id: GetRelease.Request['params']['id'], query = {}) {
-      const release = await strapi.entityService.findOne(RELEASE_MODEL_UID, id, {
-        ...query,
+      const dbQuery = strapi.get('query-params').transform(RELEASE_MODEL_UID, query);
+      const release = await strapi.db.query(RELEASE_MODEL_UID).findOne({
+        ...dbQuery,
+        where: { id },
       });
 
       return release;
     },
 
     findPage(query?: GetReleases.Request['query']) {
-      return strapi.entityService.findPage(RELEASE_MODEL_UID, {
-        ...query,
-        populate: {
-          actions: {
-            // @ts-expect-error Ignore missing properties
-            count: true,
-          },
-        },
-      });
+      const { page, pageSize, ...dbQuery } = strapi
+        .get('query-params')
+        .transform(RELEASE_MODEL_UID, query ?? {});
+      const params = { ...dbQuery, populate: { actions: { count: true } } };
+      const [firstOrder] = Array.isArray(dbQuery.orderBy) ? dbQuery.orderBy : [dbQuery.orderBy];
+
+      if (!firstOrder || Object.keys(firstOrder)[0] !== 'scheduledAt') {
+        return strapi.db.query(RELEASE_MODEL_UID).findPage({ ...params, page, pageSize });
+      }
+
+      return findPageByScheduledAt(params, { page, pageSize });
     },
 
-    async findManyWithContentTypeEntryAttached(
-      contentTypeUid: GetContentTypeEntryReleases.Request['query']['contentTypeUid'],
-      entryId: GetContentTypeEntryReleases.Request['query']['entryId']
-    ) {
-      const releases = await strapi.db.query(RELEASE_MODEL_UID).findMany({
-        where: {
-          actions: {
-            target_type: contentTypeUid,
-            target_id: entryId,
-          },
-          releasedAt: {
-            $null: true,
-          },
-        },
-        populate: {
-          // Filter the action to get only the content type entry
-          actions: {
-            where: {
-              target_type: contentTypeUid,
-              target_id: entryId,
-            },
-          },
-        },
-      });
+    // One grouped query: a status no release has counts 0
+    async countByStatus(): Promise<Record<ReleaseStatus, number>> {
+      const qb = strapi.db.queryBuilder(RELEASE_MODEL_UID);
+      const rows = await qb
+        .select(['status', qb.raw('count(*) AS count')])
+        .groupBy('status')
+        .execute<{ status: ReleaseStatus; count: number | string }[]>({ mapResults: false });
 
-      return releases.map((release) => {
-        if (release.actions?.length) {
-          const [actionForEntry] = release.actions;
+      // Postgres returns counts as strings
+      const counts = new Map(rows.map(({ status, count }) => [status, Number(count)]));
 
-          // Remove the actions key to replace it with an action key
-          delete release.actions;
-
-          return {
-            ...release,
-            action: actionForEntry,
-          };
-        }
-
-        return release;
-      });
+      return Object.fromEntries(
+        RELEASE_STATUSES.map((status) => [status, counts.get(status) ?? 0])
+      ) as Record<ReleaseStatus, number>;
     },
 
-    async findManyWithoutContentTypeEntryAttached(
-      contentTypeUid: GetContentTypeEntryReleases.Request['query']['contentTypeUid'],
-      entryId: GetContentTypeEntryReleases.Request['query']['entryId']
-    ) {
-      // We get the list of releases where the entry is present
-      const releasesRelated = await strapi.db.query(RELEASE_MODEL_UID).findMany({
-        where: {
-          releasedAt: {
-            $null: true,
-          },
-          actions: {
-            target_type: contentTypeUid,
-            target_id: entryId,
-          },
-        },
-      });
+    findMany(query?: any) {
+      const dbQuery = strapi.get('query-params').transform(RELEASE_MODEL_UID, query ?? {});
 
-      const releases = await strapi.db.query(RELEASE_MODEL_UID).findMany({
-        where: {
-          $or: [
-            {
-              id: {
-                $notIn: releasesRelated.map((release) => release.id),
-              },
-            },
-            {
-              actions: null,
-            },
-          ],
-          releasedAt: {
-            $null: true,
-          },
-        },
-      });
-
-      return releases.map((release) => {
-        if (release.actions?.length) {
-          const [actionForEntry] = release.actions;
-
-          // Remove the actions key to replace it with an action key
-          delete release.actions;
-
-          return {
-            ...release,
-            action: actionForEntry,
-          };
-        }
-
-        return release;
+      return strapi.db.query(RELEASE_MODEL_UID).findMany({
+        ...dbQuery,
       });
     },
 
     async update(
-      id: number,
+      id: Data.ID,
       releaseData: UpdateRelease.Request['body'],
       { user }: { user: UserInfo }
     ) {
@@ -368,24 +425,41 @@ const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
         validateScheduledAtIsLaterThanNow(releaseWithCreatorFields.scheduledAt),
       ]);
 
-      const release = await strapi.entityService.findOne(RELEASE_MODEL_UID, id);
+      const { release, updatedRelease, changes } = await strapi.db.transaction(async () => {
+        const release = await lockPlannedRelease(
+          id,
+          ['name', 'scheduledAt', 'timezone', 'releaseCondition'],
+          { strapi }
+        );
 
-      if (!release) {
-        throw new errors.NotFoundError(`No release found for id ${id}`);
-      }
+        const updatedRelease = await strapi.db.query(RELEASE_MODEL_UID).update({
+          where: { id },
+          // The schedule is replaced as a whole: an omitted date or timezone is cleared, and an
+          // omitted date unschedules the release, as for its job below
+          data: {
+            ...releaseWithCreatorFields,
+            scheduledAt: releaseData.scheduledAt ?? null,
+            timezone: releaseData.timezone ?? null,
+          },
+        });
 
-      if (release.releasedAt) {
-        throw new errors.ValidationError('Release already published');
-      }
+        if (!updatedRelease) {
+          throw new errors.NotFoundError(`No release found for id ${id}`);
+        }
 
-      const updatedRelease = await strapi.entityService.update(RELEASE_MODEL_UID, id, {
-        /*
-         * The type returned from the entity service: Partial<Input<"plugin::content-releases.release">>
-         * is not compatible with the type we are passing here: UpdateRelease.Request['body']
-         */
-        // @ts-expect-error see above
-        data: releaseWithCreatorFields,
+        await updateReleaseStatus(id);
+
+        return { release, updatedRelease, changes: getReleaseChanges(release, updatedRelease) };
       });
+
+      // Once committed, and before the response: a client reading the log right after sees it whole
+      if (Object.keys(changes).length > 0) {
+        await emitAudit({ strapi }, AUDITED_EVENTS.RELEASE_UPDATE, {
+          releaseId: updatedRelease.id,
+          name: updatedRelease.name,
+          changes,
+        });
+      }
 
       const schedulingService = getService('scheduling', { strapi });
 
@@ -397,180 +471,14 @@ const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
         schedulingService.cancel(id);
       }
 
-      this.updateReleaseStatus(id);
-
-      strapi.telemetry.send('didUpdateContentRelease');
+      strapi.telemetry.send('didUpdateContentRelease', {
+        eventProperties: {
+          releaseConditionChanged: release.releaseCondition !== updatedRelease.releaseCondition,
+          isScheduledChanged: Boolean(release.scheduledAt) !== Boolean(updatedRelease.scheduledAt),
+        },
+      });
 
       return updatedRelease;
-    },
-
-    async createAction(
-      releaseId: CreateReleaseAction.Request['params']['releaseId'],
-      action: Pick<CreateReleaseAction.Request['body'], 'type' | 'entry'>
-    ) {
-      const { validateEntryContentType, validateUniqueEntry } = getService('release-validation', {
-        strapi,
-      });
-
-      await Promise.all([
-        validateEntryContentType(action.entry.contentType),
-        validateUniqueEntry(releaseId, action),
-      ]);
-
-      const release = await strapi.entityService.findOne(RELEASE_MODEL_UID, releaseId);
-
-      if (!release) {
-        throw new errors.NotFoundError(`No release found for id ${releaseId}`);
-      }
-
-      if (release.releasedAt) {
-        throw new errors.ValidationError('Release already published');
-      }
-
-      const { entry, type } = action;
-
-      const populatedEntry = await getPopulatedEntry(entry.contentType, entry.id, { strapi });
-      const isEntryValid = await getEntryValidStatus(entry.contentType, populatedEntry, { strapi });
-
-      const releaseAction = await strapi.entityService.create(RELEASE_ACTION_MODEL_UID, {
-        data: {
-          type,
-          contentType: entry.contentType,
-          locale: entry.locale,
-          isEntryValid,
-          entry: {
-            id: entry.id,
-            __type: entry.contentType,
-            __pivot: { field: 'entry' },
-          },
-          release: releaseId,
-        },
-        populate: { release: { fields: ['id'] }, entry: { fields: ['id'] } },
-      });
-
-      this.updateReleaseStatus(releaseId);
-
-      return releaseAction;
-    },
-
-    async findActions(
-      releaseId: GetReleaseActions.Request['params']['releaseId'],
-      query?: GetReleaseActions.Request['query']
-    ) {
-      const release = await strapi.entityService.findOne(RELEASE_MODEL_UID, releaseId, {
-        fields: ['id'],
-      });
-
-      if (!release) {
-        throw new errors.NotFoundError(`No release found for id ${releaseId}`);
-      }
-
-      return strapi.entityService.findPage(RELEASE_ACTION_MODEL_UID, {
-        ...query,
-        populate: {
-          entry: {
-            populate: '*',
-          },
-        },
-        filters: {
-          release: releaseId,
-        },
-      });
-    },
-
-    async countActions(
-      query: EntityService.Params.Pick<typeof RELEASE_ACTION_MODEL_UID, 'filters'>
-    ) {
-      return strapi.entityService.count(RELEASE_ACTION_MODEL_UID, query);
-    },
-
-    async groupActions(actions: ReleaseAction[], groupBy: ReleaseActionGroupBy) {
-      const contentTypeUids = actions.reduce<ReleaseAction['contentType'][]>((acc, action) => {
-        if (!acc.includes(action.contentType)) {
-          acc.push(action.contentType);
-        }
-
-        return acc;
-      }, []);
-      const allReleaseContentTypesDictionary = await this.getContentTypesDataForActions(
-        contentTypeUids
-      );
-      const allLocalesDictionary = await this.getLocalesDataForActions();
-
-      const formattedData = actions.map((action: ReleaseAction) => {
-        const { mainField, displayName } = allReleaseContentTypesDictionary[action.contentType];
-
-        return {
-          ...action,
-          locale: action.locale ? allLocalesDictionary[action.locale] : null,
-          contentType: {
-            displayName,
-            mainFieldValue: action.entry[mainField],
-            uid: action.contentType,
-          },
-        };
-      });
-
-      const groupName = getGroupName(groupBy);
-      return _.groupBy(groupName)(formattedData);
-    },
-
-    async getLocalesDataForActions() {
-      if (!strapi.plugin('i18n')) {
-        return {};
-      }
-
-      const allLocales: Locale[] = (await strapi.plugin('i18n').service('locales').find()) || [];
-      return allLocales.reduce<LocaleDictionary>((acc, locale) => {
-        acc[locale.code] = { name: locale.name, code: locale.code };
-
-        return acc;
-      }, {});
-    },
-
-    async getContentTypesDataForActions(contentTypesUids: ReleaseAction['contentType'][]) {
-      const contentManagerContentTypeService = strapi
-        .plugin('content-manager')
-        .service('content-types');
-
-      const contentTypesData: Record<UID.ContentType, { mainField: string; displayName: string }> =
-        {};
-      for (const contentTypeUid of contentTypesUids) {
-        const contentTypeConfig = await contentManagerContentTypeService.findConfiguration({
-          uid: contentTypeUid,
-        });
-
-        contentTypesData[contentTypeUid] = {
-          mainField: contentTypeConfig.settings.mainField,
-          displayName: strapi.getModel(contentTypeUid).info.displayName,
-        };
-      }
-
-      return contentTypesData;
-    },
-
-    getContentTypeModelsFromActions(actions: ReleaseAction[]) {
-      const contentTypeUids = actions.reduce<ReleaseAction['contentType'][]>((acc, action) => {
-        if (!acc.includes(action.contentType)) {
-          acc.push(action.contentType);
-        }
-
-        return acc;
-      }, []);
-
-      const contentTypeModelsMap = contentTypeUids.reduce(
-        (
-          acc: { [key: ReleaseAction['contentType']]: Schema.ContentType },
-          contentTypeUid: ReleaseAction['contentType']
-        ) => {
-          acc[contentTypeUid] = strapi.getModel(contentTypeUid);
-
-          return acc;
-        },
-        {}
-      );
-
-      return contentTypeModelsMap;
     },
 
     async getAllComponents() {
@@ -582,8 +490,8 @@ const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
 
       const componentsMap = components.reduce(
         (
-          acc: { [key: Schema.Component['uid']]: Schema.Component },
-          component: Schema.Component
+          acc: { [key: Struct.ComponentSchema['uid']]: Struct.ComponentSchema },
+          component: Struct.ComponentSchema
         ) => {
           acc[component.uid] = component;
 
@@ -596,25 +504,19 @@ const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
     },
 
     async delete(releaseId: DeleteRelease.Request['params']['id']) {
-      const release = (await strapi.entityService.findOne(RELEASE_MODEL_UID, releaseId, {
-        populate: {
-          actions: {
-            fields: ['id'],
+      const release: Release = await strapi.db.transaction(async () => {
+        // Only a planned release can be deleted: one that ran, failed included, stays
+        await lockPlannedRelease(releaseId, [], { strapi });
+
+        const release: Release = await strapi.db.query(RELEASE_MODEL_UID).findOne({
+          where: { id: releaseId },
+          populate: {
+            actions: {
+              select: ['id'],
+            },
           },
-        },
-      })) as unknown as Release;
+        });
 
-      if (!release) {
-        throw new errors.NotFoundError(`No release found for id ${releaseId}`);
-      }
-
-      if (release.releasedAt) {
-        throw new errors.ValidationError('Release already published');
-      }
-
-      // Only delete the release and its actions is you in fact can delete all the actions and the release
-      // Otherwise, if the transaction fails it throws an error
-      await strapi.db.transaction(async () => {
         await strapi.db.query(RELEASE_ACTION_MODEL_UID).deleteMany({
           where: {
             id: {
@@ -622,7 +524,14 @@ const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
             },
           },
         });
-        await strapi.entityService.delete(RELEASE_MODEL_UID, releaseId);
+
+        await strapi.db.query(RELEASE_MODEL_UID).delete({
+          where: {
+            id: releaseId,
+          },
+        });
+
+        return release;
       });
 
       if (release.scheduledAt) {
@@ -632,217 +541,112 @@ const createReleaseService = ({ strapi }: { strapi: LoadedStrapi }) => {
 
       strapi.telemetry.send('didDeleteContentRelease');
 
-      return release;
-    },
-
-    async publish(releaseId: PublishRelease.Request['params']['id']) {
-      const {
-        release,
-        error,
-      }: { release: Pick<Release, 'id' | 'releasedAt' | 'status'>; error: Error } =
-        await strapi.db.transaction(async ({ trx }) => {
-          /**
-           * We lock the release in this transaction, so any other process trying to publish it will wait until this transaction is finished
-           * In this transaction we don't care about rollback, becasue we want to persist the lock until the end and if it fails we want to change the release status to failed
-           */
-          const lockedRelease = (await strapi.db
-            ?.queryBuilder(RELEASE_MODEL_UID)
-            .where({ id: releaseId })
-            .select(['id', 'name', 'releasedAt', 'status'])
-            .first()
-            .transacting(trx)
-            .forUpdate()
-            .execute()) as Pick<Release, 'id' | 'name' | 'releasedAt' | 'status'> | undefined;
-
-          if (!lockedRelease) {
-            throw new errors.NotFoundError(`No release found for id ${releaseId}`);
-          }
-
-          if (lockedRelease.releasedAt) {
-            throw new errors.ValidationError('Release already published');
-          }
-
-          if (lockedRelease.status === 'failed') {
-            throw new errors.ValidationError('Release failed to publish');
-          }
-
-          try {
-            strapi.log.info(`[Content Releases] Starting to publish release ${lockedRelease.name}`);
-
-            const { collectionTypeActions, singleTypeActions } = await getFormattedActions(
-              releaseId
-            );
-
-            await strapi.db.transaction(async () => {
-              // First we publish all the singleTypes
-              for (const { uid, action, id } of singleTypeActions) {
-                await publishSingleTypeAction(uid, action, id);
-              }
-
-              // Then, we can continue with publishing the collectionTypes
-              for (const contentTypeUid of Object.keys(collectionTypeActions)) {
-                const uid = contentTypeUid as UID.ContentType;
-
-                await publishCollectionTypeAction(
-                  uid,
-                  collectionTypeActions[uid].entriesToPublishIds,
-                  collectionTypeActions[uid].entriesToUnpublishIds
-                );
-              }
-            });
-
-            const release = await strapi.db.query(RELEASE_MODEL_UID).update({
-              where: {
-                id: releaseId,
-              },
-              data: {
-                status: 'done',
-                releasedAt: new Date(),
-              },
-            });
-
-            dispatchWebhook(ALLOWED_WEBHOOK_EVENTS.RELEASES_PUBLISH, {
-              isPublished: true,
-              release,
-            });
-
-            strapi.telemetry.send('didPublishContentRelease');
-
-            return { release, error: null };
-          } catch (error) {
-            dispatchWebhook(ALLOWED_WEBHOOK_EVENTS.RELEASES_PUBLISH, {
-              isPublished: false,
-              error,
-            });
-
-            // We need to run the update in the same transaction because the release is locked
-            await strapi.db
-              ?.queryBuilder(RELEASE_MODEL_UID)
-              .where({ id: releaseId })
-              .update({
-                status: 'failed',
-              })
-              .transacting(trx)
-              .execute();
-
-            // At this point, we don't want to throw the error because if that happen we rollback the change in the release status
-            // We want to throw the error after the transaction is finished, so we return the error
-            return {
-              release: null,
-              error,
-            };
-          }
-        });
-
-      // Now the first transaction is commited, we can safely throw the error if it exists
-      if (error) {
-        throw error;
-      }
+      await emitAudit({ strapi }, AUDITED_EVENTS.RELEASE_DELETE, {
+        releaseId: release.id,
+        name: release.name,
+      });
 
       return release;
     },
 
-    async updateAction(
-      actionId: UpdateReleaseAction.Request['params']['actionId'],
-      releaseId: UpdateReleaseAction.Request['params']['releaseId'],
-      update: UpdateReleaseAction.Request['body']
+    async publish(
+      releaseId: PublishRelease.Request['params']['id'],
+      { trigger }: { trigger: PublishTrigger }
     ) {
-      const updatedAction = await strapi.db.query(RELEASE_ACTION_MODEL_UID).update({
-        where: {
-          id: actionId,
-          release: {
-            id: releaseId,
-            releasedAt: {
-              $null: true,
-            },
-          },
-        },
-        data: update,
-      });
+      // The release stays locked for the whole run. A failure the run records commits as
+      // `failed`; any other error rolls everything back.
+      const result = await strapi.db.transaction(() =>
+        runLocked(releaseId, trigger).catch((caught: unknown) => {
+          throw toError(caught);
+        })
+      );
 
-      if (!updatedAction) {
-        throw new errors.NotFoundError(
-          `Action with id ${actionId} not found in release with id ${releaseId} or it is already published`
-        );
+      // A manual publish that would release nothing never ran: no failure to record
+      if (result.kind === 'rejected') {
+        throw result.error;
       }
 
-      return updatedAction;
-    },
+      // Webhook and audit only once the outcome is committed: a run that rolled back sends neither
+      if (result.kind === 'failed') {
+        const { error, release } = result;
+        await reportFailedRun(release, error, { trigger });
 
-    async deleteAction(
-      actionId: DeleteReleaseAction.Request['params']['actionId'],
-      releaseId: DeleteReleaseAction.Request['params']['releaseId']
-    ) {
-      const deletedAction = await strapi.db.query(RELEASE_ACTION_MODEL_UID).delete({
-        where: {
-          id: actionId,
-          release: {
-            id: releaseId,
-            releasedAt: {
-              $null: true,
-            },
-          },
-        },
-      });
-
-      if (!deletedAction) {
-        throw new errors.NotFoundError(
-          `Action with id ${actionId} not found in release with id ${releaseId} or it is already published`
-        );
-      }
-
-      this.updateReleaseStatus(releaseId);
-
-      return deletedAction;
-    },
-
-    async updateReleaseStatus(releaseId: Release['id']) {
-      const [totalActions, invalidActions] = await Promise.all([
-        this.countActions({
-          filters: {
-            release: releaseId,
-          },
-        }),
-        this.countActions({
-          filters: {
-            release: releaseId,
-            isEntryValid: false,
-          },
-        }),
-      ]);
-
-      if (totalActions > 0) {
-        if (invalidActions > 0) {
-          return strapi.db.query(RELEASE_MODEL_UID).update({
-            where: {
-              id: releaseId,
-            },
-            data: {
-              status: 'blocked',
-            },
+        // The frozen release comes with the error, telling a run that failed from a refused publish
+        if (error instanceof errors.ValidationError) {
+          throw new errors.ValidationError(error.message, {
+            ...(typeof error.details === 'object' && error.details),
+            release,
           });
         }
 
-        return strapi.db.query(RELEASE_MODEL_UID).update({
-          where: {
-            id: releaseId,
-          },
+        // Another application error is meant for the client: sent as is
+        if (error instanceof errors.ApplicationError) {
+          throw error;
+        }
+
+        // An unexpected error would be a bare 500. Only its name is sent, its message can carry row
+        // contents: the log keeps the whole error
+        strapi.log.error(`[Content Releases] Release ${release.name} failed`, { error });
+        throw new errors.ApplicationError(
+          `An entry couldn't be released (${getErrorName(error)})`,
+          { release }
+        );
+      }
+
+      const { release } = result;
+      await reportReleasedRun(release, { trigger });
+
+      return release;
+    },
+
+    reportFailedRun,
+    reportReleasedRun,
+
+    // Freezes a release whose run never happened. An empty one missed nothing: it ends done, as
+    // its run would have. Any other fails with every entry skipped. The caller holds the release
+    // lock and has checked, under it, that the release is still planned.
+    async recordMissedRun(
+      releaseId: Release['id'],
+      failureReason: ReleaseFailureReason
+    ): Promise<(Release & RunTotals) | null> {
+      const actions: Pick<ReleaseAction, 'id'>[] = await strapi.db
+        .query(RELEASE_ACTION_MODEL_UID)
+        .findMany({ where: { release: { id: releaseId } }, select: ['id'] });
+
+      const endsDone = failureReason === 'missed_schedule' && actions.length === 0;
+
+      const release: (Release & RunTotals) | null = await strapi.db
+        .query(RELEASE_MODEL_UID)
+        .update({
+          where: { id: releaseId, releasedAt: null },
           data: {
-            status: 'ready',
+            status: endsDone ? 'done' : 'failed',
+            releasedAt: new Date(),
+            failureReason: endsDone ? null : failureReason,
+            totalPublishedEntries: 0,
+            totalUnpublishedEntries: 0,
+            totalSkippedEntries: actions.length,
           },
+        });
+
+      if (!release) {
+        return null;
+      }
+
+      if (actions.length > 0) {
+        await strapi.db.query(RELEASE_ACTION_MODEL_UID).updateMany({
+          where: { id: { $in: actions.map((action) => action.id) }, outcome: null },
+          data: { outcome: 'skipped_missed' },
         });
       }
 
-      return strapi.db.query(RELEASE_MODEL_UID).update({
-        where: {
-          id: releaseId,
-        },
-        data: {
-          status: 'empty',
-        },
-      });
+      return release;
     },
+
+    updateReleaseStatus,
   };
 };
+
+export type ReleaseService = ReturnType<typeof createReleaseService>;
 
 export default createReleaseService;

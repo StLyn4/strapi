@@ -13,13 +13,13 @@ const data = {
 };
 
 const dogModel = {
-  draftAndPublish: false,
   attributes: {
     name: {
       type: 'string',
       required: false,
     },
   },
+  draftAndPublish: true,
   connection: 'default',
   singularName: 'dog',
   pluralName: 'dogs',
@@ -31,9 +31,11 @@ const dogModel = {
 const dogs = [
   {
     name: null,
+    publishedAt: null,
   },
   {
     name: 'Atos',
+    publishedAt: null,
   },
 ];
 
@@ -69,15 +71,15 @@ describe('Migration - required attribute', () => {
       expect(dogWithNameNull).toBeTruthy();
     });
 
-    test('Cannot create an entry with null after migration', async () => {
+    test('Cannot publish an entry with null after migration', async () => {
       // remove null values otherwise the migration would fail
 
       const { body } = await rq({
         method: 'PUT',
-        url: `/content-manager/collection-types/api::dog.dog/${data.dogs[0].id}`,
+        url: `/content-manager/collection-types/api::dog.dog/${data.dogs[0].documentId}`,
         body: { name: 'Nelson' },
       });
-      data.dogs[0] = body;
+      data.dogs[0] = body.data;
 
       // migration
       const schema = await modelsUtils.getContentTypeSchema(dogModel.singularName, { strapi });
@@ -87,10 +89,15 @@ describe('Migration - required attribute', () => {
       await restart();
 
       // Try to create an entry with null
-      const res = await rq({
+      const creationRes = await rq({
         method: 'POST',
         url: '/content-manager/collection-types/api::dog.dog',
         body: { name: null },
+      });
+
+      const res = await rq({
+        method: 'POST',
+        url: `/content-manager/collection-types/api::dog.dog/${creationRes.body.data.documentId}/actions/publish`,
       });
 
       expect(res.body).toMatchObject({
@@ -129,8 +136,8 @@ describe('Migration - required attribute', () => {
         body: { name: null },
       });
 
-      expect(res.body).toMatchObject({ name: null });
-      data.dogs.push(res.body);
+      expect(res.body.data).toMatchObject({ name: null });
+      data.dogs.push(res.body.data);
     });
   });
 });

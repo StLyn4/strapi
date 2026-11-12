@@ -1,10 +1,11 @@
-import { translatedErrors as errorsTrads } from '@strapi/helper-plugin';
-import { snakeCase } from 'lodash/fp';
+import { translatedErrors as errorsTrads } from '@strapi/admin/strapi-admin';
+import snakeCase from 'lodash/snakeCase';
 import * as yup from 'yup';
 
 import { getTrad } from '../../../utils/getTrad';
-import { CATEGORY_NAME_REGEX } from '../category/regex';
 import { createComponentUid } from '../utils/createUid';
+
+const CATEGORY_NAME_REGEX = /^[A-Za-z][-_0-9A-Za-z]*$/;
 
 export const createComponentSchema = (
   usedComponentNames: Array<string>,
@@ -18,7 +19,7 @@ export const createComponentSchema = (
       .string()
       .test({
         name: 'nameAlreadyUsed',
-        message: errorsTrads.unique,
+        message: errorsTrads.unique.id,
         test(value) {
           if (!value) {
             return false;
@@ -53,11 +54,11 @@ export const createComponentSchema = (
           });
         },
       })
-      .required(errorsTrads.required),
+      .required(errorsTrads.required.id),
     category: yup
       .string()
-      .matches(CATEGORY_NAME_REGEX, errorsTrads.regex)
-      .required(errorsTrads.required),
+      .matches(CATEGORY_NAME_REGEX, getTrad('error.category.format'))
+      .required(errorsTrads.required.id),
 
     icon: yup.string(),
   };

@@ -1,21 +1,13 @@
-import 'koa-bodyparser';
-
 import authentication from './authentication';
+import permission from './permission';
 import role from './role';
 import user from './user';
-import auditLogs from './audit-logs';
 import admin from './admin';
-import workflows from './workflows';
-import stages from './workflows/stages';
-import assignees from './workflows/assignees';
 
 export default {
   authentication,
+  permission,
   role,
   user,
-  auditLogs,
   admin,
-  workflows,
-  stages,
-  assignees,
 };

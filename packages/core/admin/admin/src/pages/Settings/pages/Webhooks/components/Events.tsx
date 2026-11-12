@@ -1,12 +1,9 @@
 import * as React from 'react';
 
-import { createContext } from '@radix-ui/react-context';
 import {
-  BaseCheckbox,
+  Box,
   Checkbox,
-  FieldLabel,
   Flex,
-  Loader,
   RawTable as Table,
   RawTbody as Tbody,
   RawTd as Td,
@@ -15,23 +12,25 @@ import {
   RawTr as Tr,
   Typography,
   VisuallyHidden,
+  Field,
+  CheckboxProps,
+  useCollator,
 } from '@strapi/design-system';
-import { useFormikContext, FieldInputProps } from 'formik';
 import { MessageDescriptor, useIntl } from 'react-intl';
-import styled from 'styled-components';
+import { styled } from 'styled-components';
 
+import { useField } from '../../../../../components/Form';
 import { useContentTypes } from '../../../../../hooks/useContentTypes';
+
+import type { ContentType } from '../../../../../../../shared/contracts/content-types';
+
+const EMPTY_DISABLED_EVENTS: NonNullable<EventsRowProps['disabledEvents']> = [];
+const EMPTY_EVENTS: NonNullable<EventsRowProps['events']> = [];
+const EMPTY_INPUT_VALUE: NonNullable<EventsRowProps['inputValue']> = [];
 
 /* -------------------------------------------------------------------------------------------------
  * EventsRoot
  * -----------------------------------------------------------------------------------------------*/
-
-interface WebhookEventContextValue {
-  isDraftAndPublish: boolean;
-}
-
-const [WebhookEventProvider, useWebhookEvent] =
-  createContext<WebhookEventContextValue>('WebhookEvent');
 
 interface EventsRootProps {
   children: React.ReactNode;
@@ -39,12 +38,6 @@ interface EventsRootProps {
 
 const EventsRoot = ({ children }: EventsRootProps) => {
   const { formatMessage } = useIntl();
-  const { collectionTypes, isLoading } = useContentTypes();
-
-  const isDraftAndPublish = React.useMemo(
-    () => collectionTypes.some((ct) => ct.options?.draftAndPublish === true),
-    [collectionTypes]
-  );
 
   const label = formatMessage({
     id: 'Settings.webhooks.form.events',
@@ -52,20 +45,11 @@ const EventsRoot = ({ children }: EventsRootProps) => {
   });
 
   return (
-    <WebhookEventProvider isDraftAndPublish={isDraftAndPublish}>
-      <Flex direction="column" alignItems="stretch" gap={1}>
-        <FieldLabel aria-hidden>{label}</FieldLabel>
-        {isLoading && (
-          <Loader>
-            {formatMessage({
-              id: 'Settings.webhooks.events.isLoading',
-              defaultMessage: 'Events loading',
-            })}
-          </Loader>
-        )}
-        <StyledTable aria-label={label}>{children}</StyledTable>
-      </Flex>
-    </WebhookEventProvider>
+    <Flex direction="column" alignItems="stretch" gap={1}>
+      <Field.Label aria-hidden>{label}</Field.Label>
+      {/* @ts-expect-error – TODO: add colCount & rowCount */}
+      <StyledTable aria-label={label}>{children}</StyledTable>
+    </Flex>
   );
 };
 
@@ -83,9 +67,8 @@ const StyledTable = styled(Table)`
   th {
     padding-block-start: ${({ theme }) => theme.spaces[3]};
     padding-block-end: ${({ theme }) => theme.spaces[3]};
-    width: 10%;
+    width: 6%;
     vertical-align: middle;
-    text-align: center;
   }
 
   tbody tr td:first-child {
@@ -105,26 +88,21 @@ interface EventsHeadersProps {
   getHeaders?: typeof getCEHeaders;
 }
 
-const getCEHeaders = (isDraftAndPublish: boolean): MessageDescriptor[] => {
+const getCEHeaders = (): MessageDescriptor[] => {
   const headers = [
     { id: 'Settings.webhooks.events.create', defaultMessage: 'Create' },
     { id: 'Settings.webhooks.events.update', defaultMessage: 'Update' },
     { id: 'app.utils.delete', defaultMessage: 'Delete' },
+    { id: 'app.utils.publish', defaultMessage: 'Publish' },
+    { id: 'app.utils.unpublish', defaultMessage: 'Unpublish' },
   ];
-
-  if (isDraftAndPublish) {
-    headers.push({ id: 'app.utils.publish', defaultMessage: 'Publish' });
-    headers.push({ id: 'app.utils.unpublish', defaultMessage: 'Unpublish' });
-  }
 
   return headers;
 };
 
 const EventsHeaders = ({ getHeaders = getCEHeaders }: EventsHeadersProps) => {
-  const { isDraftAndPublish } = useWebhookEvent('Headers');
-
   const { formatMessage } = useIntl();
-  const headers = getHeaders(isDraftAndPublish);
+  const headers = getHeaders();
 
   return (
     <Thead>
@@ -179,13 +157,11 @@ interface EventsBodyProps {
 }
 
 const EventsBody = ({ providedEvents }: EventsBodyProps) => {
-  const { isDraftAndPublish } = useWebhookEvent('Body');
-
-  const events = providedEvents || getCEEvents(isDraftAndPublish);
-  const { values, handleChange: onChange } = useFormikContext<FormikContextValue>();
+  const events = providedEvents || getCEEvents();
+  const { value = [], onChange } = useField<string[]>('events');
 
   const inputName = 'events';
-  const inputValue = values.events;
+  const inputValue = value;
   const disabledEvents: string[] = [];
 
   const formattedValue = inputValue.reduce<Record<string, string[]>>((acc, curr) => {
@@ -199,9 +175,7 @@ const EventsBody = ({ providedEvents }: EventsBodyProps) => {
     return acc;
   }, {});
 
-  const handleSelect: React.ChangeEventHandler<HTMLInputElement> = ({
-    target: { name, value },
-  }) => {
+  const handleSelect: EventsRowProps['handleSelect'] = (name, value) => {
     const set = new Set(inputValue);
 
     if (value) {
@@ -209,12 +183,11 @@ const EventsBody = ({ providedEvents }: EventsBodyProps) => {
     } else {
       set.delete(name);
     }
-    onChange({ target: { name: inputName, value: Array.from(set) } });
+
+    onChange(inputName, Array.from(set));
   };
 
-  const handleSelectAll: React.ChangeEventHandler<HTMLInputElement> = ({
-    target: { name, value },
-  }) => {
+  const handleSelectAll: EventsRowProps['handleSelectAll'] = (name, value) => {
     const set = new Set(inputValue);
 
     if (value) {
@@ -226,45 +199,150 @@ const EventsBody = ({ providedEvents }: EventsBodyProps) => {
     } else {
       events[name].forEach((event) => set.delete(event));
     }
-    onChange({ target: { name: inputName, value: Array.from(set) } });
+
+    onChange(inputName, Array.from(set));
   };
 
   return (
     <Tbody>
       {Object.entries(events).map(([event, value]) => {
         return (
-          <EventsRow
-            disabledEvents={disabledEvents}
-            key={event}
-            name={event}
-            events={value}
-            inputValue={formattedValue[event]}
-            handleSelect={handleSelect}
-            handleSelectAll={handleSelectAll}
-          />
+          <React.Fragment key={event}>
+            <EventsRow
+              disabledEvents={disabledEvents}
+              name={event}
+              events={value}
+              inputValue={formattedValue[event]}
+              handleSelect={handleSelect}
+              handleSelectAll={handleSelectAll}
+            />
+            {event === 'entry' && (
+              <EventsContentTypes events={value} selectedEvents={formattedValue[event]} />
+            )}
+          </React.Fragment>
         );
       })}
     </Tbody>
   );
 };
 
-const getCEEvents = (
-  isDraftAndPublish: boolean
-): Required<Pick<EventsBodyProps, 'providedEvents'>>['providedEvents'] => {
+const getCEEvents = (): Required<Pick<EventsBodyProps, 'providedEvents'>>['providedEvents'] => {
   const entryEvents: FormikContextValue['events'] = [
     'entry.create',
     'entry.update',
     'entry.delete',
+    'entry.publish',
+    'entry.unpublish',
   ];
-
-  if (isDraftAndPublish) {
-    entryEvents.push('entry.publish', 'entry.unpublish');
-  }
 
   return {
     entry: entryEvents,
     media: ['media.create', 'media.update', 'media.delete'],
   };
+};
+
+/* -------------------------------------------------------------------------------------------------
+ * EventsContentTypes
+ * -----------------------------------------------------------------------------------------------*/
+
+const DRAFT_AND_PUBLISH_EVENTS = ['entry.publish', 'entry.unpublish'];
+
+interface EventsContentTypesProps {
+  /**
+   * The entry events, one per column
+   */
+  events: string[];
+  /**
+   * The entry events selected for every content type
+   */
+  selectedEvents?: string[];
+}
+
+const EMPTY_SELECTED_EVENTS: NonNullable<EventsContentTypesProps['selectedEvents']> = [];
+
+/**
+ * Lists the content types below the entry events, to select events for a single content type.
+ * The events selected for every content type are displayed as selected and can't be changed.
+ */
+const EventsContentTypes = ({
+  events,
+  selectedEvents = EMPTY_SELECTED_EVENTS,
+}: EventsContentTypesProps) => {
+  const { locale } = useIntl();
+  const { isLoading, collectionTypes, singleTypes } = useContentTypes();
+  const { value = {}, onChange } = useField<Record<string, string[]>>('contentTypeEvents');
+
+  const formatter = useCollator(locale, {
+    sensitivity: 'base',
+  });
+
+  const toRows = (contentTypes: ContentType[]) =>
+    contentTypes
+      .map((contentType) => ({
+        uid: contentType.uid as string,
+        label: contentType.info.displayName,
+        unavailableEvents: contentType.options?.draftAndPublish ? [] : DRAFT_AND_PUBLISH_EVENTS,
+      }))
+      .sort((a, b) => formatter.compare(a.label, b.label));
+
+  const rows = [...toRows(collectionTypes), ...toRows(singleTypes)];
+
+  /**
+   * Content types saved on the webhook that are not listed above (e.g. deleted since then)
+   * are displayed with their uid, otherwise they could neither be seen nor removed.
+   */
+  const unlistedRows = isLoading
+    ? []
+    : Object.keys(value)
+        .filter((uid) => !rows.some((row) => row.uid === uid))
+        .map((uid) => ({ uid, label: uid, unavailableEvents: [] as string[] }));
+
+  const setEvents = (uid: string, uidEvents: string[]) => {
+    const contentTypeEvents = { ...value, [uid]: uidEvents };
+
+    if (uidEvents.length === 0) {
+      delete contentTypeEvents[uid];
+    }
+
+    onChange('contentTypeEvents', contentTypeEvents);
+  };
+
+  return (
+    <>
+      {[...rows, ...unlistedRows].map(({ uid, label, unavailableEvents }) => {
+        const ownEvents = value[uid] ?? [];
+        const availableEvents = events.filter((event) => !unavailableEvents.includes(event));
+        const selectableEvents = availableEvents.filter((event) => !selectedEvents.includes(event));
+
+        return (
+          <EventsRow
+            key={uid}
+            name={uid}
+            label={label}
+            events={events}
+            disabledEvents={[...unavailableEvents, ...selectedEvents]}
+            inputValue={availableEvents.filter(
+              (event) => selectedEvents.includes(event) || ownEvents.includes(event)
+            )}
+            handleSelect={(event, isSelected) => {
+              setEvents(
+                uid,
+                isSelected ? [...ownEvents, event] : ownEvents.filter((e) => e !== event)
+              );
+            }}
+            handleSelectAll={(_, isSelected) => {
+              setEvents(
+                uid,
+                isSelected
+                  ? Array.from(new Set([...ownEvents, ...selectableEvents]))
+                  : ownEvents.filter((event) => !selectableEvents.includes(event))
+              );
+            }}
+          />
+        );
+      })}
+    </>
+  );
 };
 
 /* -------------------------------------------------------------------------------------------------
@@ -275,31 +353,38 @@ interface EventsRowProps {
   disabledEvents?: string[];
   events?: string[];
   inputValue?: string[];
-  handleSelect: FieldInputProps<string>['onChange'];
-  handleSelectAll: FieldInputProps<string>['onChange'];
+  handleSelect: (name: string, value: boolean) => void;
+  handleSelectAll: (name: string, value: boolean) => void;
   name: string;
+  /**
+   * Displayed instead of the name, for the rows nested below another one (e.g. a content type)
+   */
+  label?: string;
 }
 
 const EventsRow = ({
-  disabledEvents = [],
+  disabledEvents = EMPTY_DISABLED_EVENTS,
   name,
-  events = [],
-  inputValue = [],
+  label,
+  events = EMPTY_EVENTS,
+  inputValue = EMPTY_INPUT_VALUE,
   handleSelect,
   handleSelectAll,
 }: EventsRowProps) => {
   const { formatMessage } = useIntl();
+  const isNested = label !== undefined;
   const enabledCheckboxes = events.filter((event) => !disabledEvents.includes(event));
 
   const hasSomeCheckboxSelected = inputValue.length > 0;
-  const areAllCheckboxesSelected = inputValue.length === enabledCheckboxes.length;
+  // A disabled checkbox can't be selected by the user, so it doesn't prevent the row from being fully selected
+  const areAllCheckboxesSelected =
+    hasSomeCheckboxSelected &&
+    events.every((event) => inputValue.includes(event) || disabledEvents.includes(event));
 
-  const onChangeAll: React.ChangeEventHandler<HTMLInputElement> = ({ target: { name } }) => {
+  const onChangeAll: CheckboxProps['onCheckedChange'] = () => {
     const valueToSet = !areAllCheckboxesSelected;
 
-    handleSelectAll({
-      target: { name, value: valueToSet },
-    });
+    handleSelectAll(name, valueToSet);
   };
 
   const targetColumns = 5;
@@ -307,30 +392,42 @@ const EventsRow = ({
   return (
     <Tr>
       <Td>
-        <Checkbox
-          indeterminate={hasSomeCheckboxSelected && !areAllCheckboxesSelected}
-          aria-label={formatMessage({
-            id: 'global.select-all-entries',
-            defaultMessage: 'Select all entries',
-          })}
-          name={name}
-          onChange={onChangeAll}
-          value={areAllCheckboxesSelected}
-        >
-          {removeHyphensAndTitleCase(name)}
-        </Checkbox>
+        <Box paddingLeft={isNested ? 6 : 0}>
+          <Checkbox
+            aria-label={
+              isNested
+                ? undefined
+                : formatMessage({
+                    id: 'global.select-all-entries',
+                    defaultMessage: 'Select all entries',
+                  })
+            }
+            name={name}
+            disabled={enabledCheckboxes.length === 0}
+            checked={
+              hasSomeCheckboxSelected && !areAllCheckboxesSelected
+                ? 'indeterminate'
+                : areAllCheckboxesSelected
+            }
+            onCheckedChange={onChangeAll}
+          >
+            {label ?? removeHyphensAndTitleCase(name)}
+          </Checkbox>
+        </Box>
       </Td>
 
       {events.map((event) => {
         return (
-          <Td key={event}>
-            <BaseCheckbox
-              disabled={disabledEvents.includes(event)}
-              aria-label={event}
-              name={event}
-              value={inputValue.includes(event)}
-              onValueChange={(value) => handleSelect({ target: { name: event, value } })}
-            />
+          <Td key={event} textAlign="center">
+            <Flex width="100%" justifyContent="center">
+              <Checkbox
+                disabled={disabledEvents.includes(event)}
+                aria-label={isNested ? `${label}: ${event}` : event}
+                name={isNested ? `${name}.${event}` : event}
+                checked={inputValue.includes(event)}
+                onCheckedChange={(value) => handleSelect(event, !!value)}
+              />
+            </Flex>
           </Td>
         );
       })}

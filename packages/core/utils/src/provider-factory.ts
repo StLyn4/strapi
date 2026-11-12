@@ -1,4 +1,4 @@
-import { cloneDeep } from 'lodash/fp';
+import { cloneDeep } from 'lodash';
 import {
   createAsyncSeriesHook,
   createAsyncParallelHook,
@@ -31,41 +31,49 @@ export interface Options {
 
 type Item = Record<string, unknown>;
 
-export interface Provider {
+export interface Provider<T = unknown> {
   hooks: ProviderHooksMap;
-  register(key: string, item: Item): Promise<Provider>;
+  register(key: string, item: T): Promise<Provider>;
   delete(key: string): Promise<Provider>;
-  get(key: string): Item | undefined;
-  getWhere(filters?: Record<string, unknown>): Item[];
-  values(): Item[];
+  get(key: string): T | undefined;
+  values(): T[];
   keys(): string[];
   has(key: string): boolean;
   size(): number;
-  clear(): Promise<Provider>;
+  clear(): Promise<Provider<T>>;
 }
 
-export type ProviderFactory = (options?: Options) => Provider;
+export type ProviderFactory<T> = (options?: Options) => Provider<T>;
 
 /**
  * A Provider factory
  */
-const providerFactory: ProviderFactory = (options = {}) => {
+const providerFactory = <T = Item>(options: Options = {}): Provider<T> => {
   const { throwOnDuplicates = true } = options;
 
   const state = {
     hooks: createProviderHooksMap(),
-    registry: new Map<string, Item>(),
+    registry: new Map<string, T>(),
+    // Keys whose registration is awaiting the willRegister hook
+    pendingKeys: new Set<string>(),
   };
 
   return {
     hooks: state.hooks,
 
-    async register(key: string, item: Item) {
-      if (throwOnDuplicates && this.has(key)) {
+    async register(key: string, item: T) {
+      if (throwOnDuplicates && (this.has(key) || state.pendingKeys.has(key))) {
         throw new Error(`Duplicated item key: ${key}`);
       }
 
-      await state.hooks.willRegister.call({ key, value: item });
+      // Reserve the key so a concurrent registration of the same key throws
+      state.pendingKeys.add(key);
+
+      try {
+        await state.hooks.willRegister.call({ key, value: item });
+      } finally {
+        state.pendingKeys.delete(key);
+      }
 
       state.registry.set(key, item);
 
@@ -90,19 +98,6 @@ const providerFactory: ProviderFactory = (options = {}) => {
 
     get(key: string) {
       return state.registry.get(key);
-    },
-
-    getWhere(filters = {}) {
-      const items = this.values();
-      const filtersEntries = Object.entries(filters);
-
-      if (filtersEntries.length === 0) {
-        return items;
-      }
-
-      return items.filter((item) => {
-        return filtersEntries.every(([key, value]) => item[key] === value);
-      });
     },
 
     values() {

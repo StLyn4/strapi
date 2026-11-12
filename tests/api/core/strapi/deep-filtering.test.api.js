@@ -52,17 +52,7 @@ const collector = {
 };
 
 const fixtures = {
-  card: [
-    {
-      name: 'Hugo LLORIS',
-    },
-    {
-      name: 'Samuel UMTITI',
-    },
-    {
-      name: 'Lucas HERNANDEZ',
-    },
-  ],
+  card: [{ name: 'Hugo LLORIS' }, { name: 'Samuel UMTITI' }, { name: 'Lucas HERNANDEZ' }],
   collector: ({ card }) => [
     {
       name: 'Bernard',
@@ -121,7 +111,7 @@ describe('Deep Filtering API', () => {
           method: 'GET',
           url: '/collectors',
           qs: {
-            filters: { cards: { name: data.card[0].attributes.name } },
+            filters: { cards: { name: data.card[0].name } },
           },
         });
         expect(Array.isArray(res.body.data)).toBe(true);
@@ -139,7 +129,7 @@ describe('Deep Filtering API', () => {
           method: 'GET',
           url: '/collectors',
           qs: {
-            filters: { cards: { name: data.card[1].attributes.name } },
+            filters: { cards: { name: data.card[1].name } },
           },
         });
 
@@ -152,6 +142,40 @@ describe('Deep Filtering API', () => {
         expect(res.body.data[0]).toMatchObject(data.collector[0]);
       });
 
+      test('should return 2 results when deep filtering with nested $or', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/collectors',
+          qs: {
+            filters: {
+              cards: {
+                $or: [
+                  {
+                    name: data.card[0].name,
+                  },
+                  {
+                    name: data.card[1].name,
+                  },
+                ],
+              },
+            },
+          },
+        });
+
+        expect(res.body.meta.pagination).toMatchObject({
+          ...pagination,
+          total: 2,
+        });
+        expect(Array.isArray(res.body.data)).toBe(true);
+        expect(res.body.data.length).toBe(2);
+        expect(res.body.data).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining(data.collector[0]),
+            expect.objectContaining(data.collector[1]),
+          ])
+        );
+      });
+
       test('should return 2 results when deep filtering with $or', async () => {
         const res = await rq({
           method: 'GET',
@@ -161,12 +185,12 @@ describe('Deep Filtering API', () => {
               $or: [
                 {
                   cards: {
-                    name: data.card[0].attributes.name,
+                    name: data.card[0].name,
                   },
                 },
                 {
                   cards: {
-                    name: data.card[1].attributes.name,
+                    name: data.card[1].name,
                   },
                 },
               ],
@@ -187,6 +211,77 @@ describe('Deep Filtering API', () => {
           ])
         );
       });
+
+      test('should return a result when deep filtering with nested $and', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/collectors',
+          qs: {
+            filters: {
+              cards: {
+                $and: [
+                  {
+                    name: {
+                      $containsi: 'HUGO',
+                    },
+                  },
+                  {
+                    name: {
+                      $containsi: 'LLORIS',
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        });
+
+        expect(res.body.meta.pagination).toMatchObject({
+          ...pagination,
+          total: 2,
+        });
+        expect(Array.isArray(res.body.data)).toBe(true);
+        expect(res.body.data.length).toBe(2);
+        expect(res.body.data).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining(data.collector[0]),
+            expect.objectContaining(data.collector[1]),
+          ])
+        );
+      });
+
+      test('should return no result when deep filtering with nested $and', async () => {
+        const res = await rq({
+          method: 'GET',
+          url: '/collectors',
+          qs: {
+            filters: {
+              cards: {
+                $and: [
+                  {
+                    name: {
+                      $contains: 'HUGO',
+                    },
+                  },
+                  {
+                    name: {
+                      $contains: 'UMTITI',
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        });
+
+        expect(res.body.meta.pagination).toMatchObject({
+          ...pagination,
+          pageCount: 0,
+          total: 0,
+        });
+        expect(Array.isArray(res.body.data)).toBe(true);
+        expect(res.body.data.length).toBe(0);
+      });
     });
 
     describe('Filter on a self manyWay relation', () => {
@@ -195,7 +290,7 @@ describe('Deep Filtering API', () => {
           method: 'GET',
           url: '/collectors',
           qs: {
-            filters: { collector_friends: { name: data.collector[0].attributes.name } },
+            filters: { collector_friends: { name: data.collector[0].name } },
           },
         });
         expect(res.body.meta.pagination).toMatchObject({
@@ -218,7 +313,7 @@ describe('Deep Filtering API', () => {
           qs: {
             filters: {
               cards: {
-                name: data.card[0].attributes.name,
+                name: data.card[0].name,
               },
             },
             _q: '',
@@ -233,17 +328,18 @@ describe('Deep Filtering API', () => {
         expect(res.body.data).toEqual(expect.arrayContaining(data.collector.slice(0, 2)));
       });
 
-      test('cards.name + _q=25', async () => {
+      // Searching by short strings could randomnly match with the document id
+      test('cards.name + _q=Bernard', async () => {
         const res = await rq({
           method: 'GET',
           url: '/collectors',
           qs: {
             filters: {
               cards: {
-                name: data.card[0].attributes.name,
+                name: data.card[0].name,
               },
             },
-            _q: 25,
+            _q: 'Bernard',
           },
         });
 
@@ -265,7 +361,7 @@ describe('Deep Filtering API', () => {
           qs: {
             filters: {
               collector_friends: {
-                name: data.collector[0].attributes.name,
+                name: data.collector[0].name,
               },
             },
             _q: '',
@@ -288,7 +384,7 @@ describe('Deep Filtering API', () => {
           qs: {
             filters: {
               collector_friends: {
-                name: data.collector[0].attributes.name,
+                name: data.collector[0].name,
               },
             },
             _q: 'isa',
